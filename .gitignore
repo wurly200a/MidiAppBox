@@ -1,0 +1,6 @@
+.cache/
+src/build/
+src/dependencies.lock
+src/managed_components/
+src/sdkconfig.old
+src/sdkconfig
