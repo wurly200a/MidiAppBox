@@ -57,7 +57,7 @@ void Display::init() {
     // Connect LVGL via esp_lvgl_port
     const lvgl_port_cfg_t lvgl_cfg = {
       .task_priority    = 4,
-      .task_stack       = 4096,
+      .task_stack       = 8192,
       .task_affinity    = -1,
       .timer_period_ms  = 5,
       // .task_max_sleep_ms = 10,
