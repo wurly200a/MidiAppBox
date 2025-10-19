@@ -1,0 +1,39 @@
+name: Build in esp32-builder
+
+on:
+  workflow_call:
+    inputs:
+      namespace:
+        type: string
+        required: true
+      artifact_name:
+        type: string
+        default: MidiAppBox
+        required: true
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          repository: wurly200a/MidiAppBox
+          ref: ${{ inputs.project_ref }}
+          submodules: recursive
+
+      - name: Build in the devcontainer
+        uses: devcontainers/ci@v0.3
+        with:
+          configFile: .devcontainer/devcontainer.json
+          push: never
+          runCmd: |
+            set -euo pipefail
+            cd src
+            idf.py build
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: src/build/midi_app_box.*

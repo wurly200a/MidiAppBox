@@ -2,7 +2,7 @@ lsp:
   server:
     type: docker
     subtype: image
-    name: ghcr.io/wurly200a/builder-esp32/esp-idf-v5.3:latest
+    name: ghcr.io/wurly200a/builder-esp32/esp-idf-v5.5:latest
     server: clangd
     launch_command: >
       /usr/local/bin/clangd-with-idf

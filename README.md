@@ -1,13 +1,20 @@
 
-
-## build
+## Prepare using docker container
 
 ```
-docker run --rm -it -v ${PWD}:/workspaces/MidiAppBox -w /workspaces/MidiAppBox ghcr.io/wurly200a/builder-esp32/esp-idf-v5.3:latest
+DEV=/dev/ttyACM0;docker run --rm -it -v ${PWD}:/workspaces/MidiAppBox -w /workspaces/MidiAppBox --device=${DEV} --group-add $(stat -c '%g' ${DEV}) ghcr.io/wurly200a/builder-esp32/esp-idf-v5.5:latest
+```
+
+## Build
+
+```
 cd src
 idf.py build
 ```
 
+## Write flash
+
 ```
-DEV=/dev/ttyACM0;docker run --rm -it -v ${PWD}:/workspaces/MidiAppBox -w /workspaces/MidiAppBox --device=${DEV} --group-add $(stat -c '%g' ${DEV}) ghcr.io/wurly200a/builder-esp32/esp-idf-v5.3:latest
+cd src
+idf.py flash
 ```
