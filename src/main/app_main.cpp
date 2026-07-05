@@ -54,21 +54,15 @@ extern "C" void app_main()
         if (!wasmrt::runtime_init()) {
             ESP_LOGE(TAG, "WASM runtime init failed");
         }
-        // SD 準備+アプリ起動は FATFS 用に十分なスタックを持つタスクで行う
+        // SD 準備+メニュー表示は FATFS 用に十分なスタックを持つタスクで行う
         auto boot_task = [](void*) {
-            vTaskDelay(pdMS_TO_TICKS(500)); // SD 安定待ち(MP3 モードのタイミングに合わせる)
+            vTaskDelay(pdMS_TO_TICKS(500)); // SD 安定待ち
             char status[64];
-            if (wasmrt::launcher_prepare_sd(status, sizeof(status))) {
-                // Phase 5A: 固定パスのアプリを起動
-                char path[64];
-                snprintf(path, sizeof(path), "%s/demo.wasm", wasmrt::kAppsDir);
-                wasmrt::hostapi_app_screen_create();
-                wasmrt::app_start(path, [](const char* err) {
-                    ESP_LOGI(TAG, "app stopped: %s", err ? err : "ok");
-                });
-            } else {
+            if (!wasmrt::launcher_prepare_sd(status, sizeof(status))) {
                 ESP_LOGE(TAG, "SD prepare failed: %s", status);
             }
+            // 失敗時もメニューは出す(エラー表示付き・空リスト)
+            wasmrt::launcher_show(status);
             vTaskDelete(nullptr);
         };
         xTaskCreate(boot_task, "wasm_boot", 8192, nullptr, 4, nullptr);

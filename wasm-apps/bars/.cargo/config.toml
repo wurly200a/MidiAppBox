@@ -1,0 +1,6 @@
+[build]
+target = "wasm32-unknown-unknown"
+
+[target.wasm32-unknown-unknown]
+# Rust の既定スタック(1MB)は linear memory を肥大させるため縮小する
+rustflags = ["-C", "link-arg=-zstack-size=8192"]
