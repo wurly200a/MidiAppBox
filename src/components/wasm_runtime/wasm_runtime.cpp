@@ -13,20 +13,22 @@
 
 #include <pthread.h>
 #include <cstring>
+#include <cstdio>
 #include <algorithm>
+#include <atomic>
 
 static const char* TAG = "WASM";
 
-// EMBED_FILES で埋め込んだ .wasm
+// EMBED_FILES で埋め込んだ .wasm(hello/bench はテスト・計測用に残す)
 extern const uint8_t hello_wasm_start[] asm("_binary_hello_wasm_start");
 extern const uint8_t hello_wasm_end[]   asm("_binary_hello_wasm_end");
-extern const uint8_t demo_wasm_start[] asm("_binary_demo_wasm_start");
-extern const uint8_t demo_wasm_end[]   asm("_binary_demo_wasm_end");
 extern const uint8_t bench_wasm_start[] asm("_binary_bench_wasm_start");
 extern const uint8_t bench_wasm_end[]   asm("_binary_bench_wasm_end");
 
-// WAMR グローバルヒーププール(内部 SRAM, BSS)
-static uint8_t s_wamr_heap[128 * 1024];
+// WAMR グローバルヒーププール(内部 SRAM, BSS)。
+// Phase 4 実測でデモ規模の消費は ~27KB。128KB だと FATFS マウントに必要な
+// 連続ヒープ(sector 4096 × max_files 8 ≈ 38KB)が確保できなくなるため 64KB。
+static uint8_t s_wamr_heap[64 * 1024];
 
 namespace wasmrt {
 
@@ -237,14 +239,10 @@ void log_stats(const char* name, uint32_t* v, int n)
 
 } // namespace
 
-// ---- Phase 2: demo ----
+// ---- Phase 5: ランタイム常駐+アプリライフサイクル ----
 
-namespace {
-
-void* demo_thread(void*)
+bool runtime_init()
 {
-    const size_t heap_before = esp_get_free_heap_size();
-
     RuntimeInitArgs init_args;
     memset(&init_args, 0, sizeof(init_args));
     init_args.mem_alloc_type = Alloc_With_Pool;
@@ -252,116 +250,219 @@ void* demo_thread(void*)
     init_args.mem_alloc_option.pool.heap_size = sizeof(s_wamr_heap);
 
     if (!wasm_runtime_full_init(&init_args)) {
-        ESP_LOGE(TAG, "demo: wasm_runtime_full_init failed");
-        return nullptr;
+        ESP_LOGE(TAG, "wasm_runtime_full_init failed");
+        return false;
     }
     if (!hostapi_register_natives()) {
         wasm_runtime_destroy();
-        return nullptr;
+        return false;
     }
+    ESP_LOGI(TAG, "runtime ready (pool %u bytes), free heap %u",
+             (unsigned)sizeof(s_wamr_heap), (unsigned)esp_get_free_heap_size());
+    return true;
+}
 
-    // Phase 4: ホスト API 呼び出しコスト計測(デモ開始前に一度)
+void run_bench()
+{
     run_bench_module();
+}
 
+namespace {
+
+enum class AppState { Idle, Running, StopRequested };
+
+std::atomic<AppState> s_app_state{AppState::Idle};
+char s_app_path[160];
+AppStoppedCb s_on_stopped = nullptr;
+char s_app_error[160];
+
+// SD 上のファイルを malloc したバッファへ読む。失敗時 nullptr。
+uint8_t* read_wasm_file(const char* path, uint32_t* out_size)
+{
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        snprintf(s_app_error, sizeof(s_app_error), "cannot open %s", path);
+        return nullptr;
+    }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size <= 0 || size > 512 * 1024) {
+        snprintf(s_app_error, sizeof(s_app_error), "bad file size (%ld)", size);
+        fclose(f);
+        return nullptr;
+    }
+    uint8_t* buf = (uint8_t*)malloc(size);
+    if (!buf || fread(buf, 1, size, f) != (size_t)size) {
+        snprintf(s_app_error, sizeof(s_app_error), "read failed: %s", path);
+        free(buf);
+        fclose(f);
+        return nullptr;
+    }
+    fclose(f);
+    *out_size = (uint32_t)size;
+    return buf;
+}
+
+void* app_thread(void*)
+{
+    const size_t heap_at_start = esp_get_free_heap_size();
+    const char* error = nullptr;
     char error_buf[128];
-    const uint32_t wasm_size = (uint32_t)(demo_wasm_end - demo_wasm_start);
-    // interpreter はバッファを module 生存中参照する。デモは常駐なので保持し続ける
-    uint8_t* wasm_buf = (uint8_t*)malloc(wasm_size);
-    if (!wasm_buf) {
-        ESP_LOGE(TAG, "demo: malloc for wasm buf failed");
-        wasm_runtime_destroy();
-        return nullptr;
-    }
-    memcpy(wasm_buf, demo_wasm_start, wasm_size);
 
-    wasm_module_t module =
-        wasm_runtime_load(wasm_buf, wasm_size, error_buf, sizeof(error_buf));
-    if (!module) {
-        ESP_LOGE(TAG, "demo: load failed: %s", error_buf);
-        return nullptr;
-    }
-    wasm_module_inst_t inst = wasm_runtime_instantiate(
-        module, 8 * 1024, 8 * 1024, error_buf, sizeof(error_buf));
-    if (!inst) {
-        ESP_LOGE(TAG, "demo: instantiate failed: %s", error_buf);
-        return nullptr;
-    }
-    wasm_exec_env_t exec_env = wasm_runtime_create_exec_env(inst, 8 * 1024);
-    if (!exec_env) {
-        ESP_LOGE(TAG, "demo: create_exec_env failed");
-        return nullptr;
-    }
+    // interpreter はバッファを module 生存中参照する(fast-interp は in-place
+    // 書き換えもする)ので、unload まで保持する
+    uint32_t wasm_size = 0;
+    uint8_t* wasm_buf = read_wasm_file(s_app_path, &wasm_size);
 
-    wasm_function_inst_t fn_init = wasm_runtime_lookup_function(inst, "app_init");
-    wasm_function_inst_t fn_tick = wasm_runtime_lookup_function(inst, "app_tick");
-    if (!fn_init || !fn_tick) {
-        ESP_LOGE(TAG, "demo: app_init/app_tick not exported");
-        return nullptr;
-    }
+    wasm_module_t module = nullptr;
+    wasm_module_inst_t inst = nullptr;
+    wasm_exec_env_t exec_env = nullptr;
 
-    uint32_t argv[1] = {0};
-    if (!wasm_runtime_call_wasm(exec_env, fn_init, 0, argv)) {
-        ESP_LOGE(TAG, "demo: app_init failed: %s", wasm_runtime_get_exception(inst));
-        return nullptr;
-    }
-    ESP_LOGI(TAG, "demo: app_init() = %d, free heap %u (delta %d), tick loop start",
-             (int)argv[0], (unsigned)esp_get_free_heap_size(),
-             (int)(heap_before - esp_get_free_heap_size()));
+    do {
+        if (!wasm_buf) {
+            error = s_app_error;
+            break;
+        }
+        ESP_LOGI(TAG, "app: loading %s (%u bytes)", s_app_path, (unsigned)wasm_size);
+
+        module = wasm_runtime_load(wasm_buf, wasm_size, error_buf, sizeof(error_buf));
+        if (!module) {
+            snprintf(s_app_error, sizeof(s_app_error), "load: %s", error_buf);
+            error = s_app_error;
+            break;
+        }
+        inst = wasm_runtime_instantiate(module, 8 * 1024, 8 * 1024,
+                                        error_buf, sizeof(error_buf));
+        if (!inst) {
+            snprintf(s_app_error, sizeof(s_app_error), "instantiate: %s", error_buf);
+            error = s_app_error;
+            break;
+        }
+        exec_env = wasm_runtime_create_exec_env(inst, 8 * 1024);
+        if (!exec_env) {
+            error = "create_exec_env failed";
+            break;
+        }
+
+        wasm_function_inst_t fn_init = wasm_runtime_lookup_function(inst, "app_init");
+        wasm_function_inst_t fn_tick = wasm_runtime_lookup_function(inst, "app_tick");
+        wasm_function_inst_t fn_exit = wasm_runtime_lookup_function(inst, "app_exit");
+        if (!fn_init || !fn_tick) {
+            error = "app_init/app_tick not exported";
+            break;
+        }
+
+        uint32_t argv[1] = {0};
+        if (!wasm_runtime_call_wasm(exec_env, fn_init, 0, argv)) {
+            snprintf(s_app_error, sizeof(s_app_error), "app_init: %s",
+                     wasm_runtime_get_exception(inst));
+            error = s_app_error;
+            break;
+        }
+        ESP_LOGI(TAG, "app: app_init() = %d, free heap %u, tick loop start",
+                 (int)argv[0], (unsigned)esp_get_free_heap_size());
 
 #if CONFIG_WAMR_ENABLE_MEMORY_PROFILING
-    // Phase 4: WAMR 内部のメモリ消費(プロファイリング有効ビルドのみ関数が存在する)
-    wasm_runtime_dump_mem_consumption(exec_env);
+        wasm_runtime_dump_mem_consumption(exec_env);
 #endif
 
-    // 周期は vTaskDelayUntil による絶対時刻基準(音楽アプリ想定の周期駆動)
-    TickType_t last_wake = xTaskGetTickCount();
-    int64_t prev_start_us = 0;
-    int sample_idx = 0;
-    while (true) {
-        const int64_t start_us = esp_timer_get_time();
-        if (!wasm_runtime_call_wasm(exec_env, fn_tick, 0, nullptr)) {
-            ESP_LOGE(TAG, "demo: app_tick trapped: %s",
-                     wasm_runtime_get_exception(inst));
-            return nullptr;
-        }
-        const int64_t end_us = esp_timer_get_time();
-
-        // Phase 4: 最初の kJitterSamples 回の起床間隔と実行時間を収集
-        if (sample_idx < kJitterSamples) {
-            if (prev_start_us != 0) {
-                s_intervals_us[sample_idx] = (uint32_t)(start_us - prev_start_us);
-                s_durations_us[sample_idx] = (uint32_t)(end_us - start_us);
-                sample_idx++;
-                if (sample_idx == kJitterSamples) {
-                    log_stats("tick interval (target 100000)", s_intervals_us,
-                              kJitterSamples);
-                    log_stats("app_tick duration", s_durations_us, kJitterSamples);
-                }
+        // 周期は vTaskDelayUntil による絶対時刻基準(音楽アプリ想定の周期駆動)
+        TickType_t last_wake = xTaskGetTickCount();
+        int64_t prev_start_us = 0;
+        int sample_idx = 0;
+        while (s_app_state.load() == AppState::Running) {
+            const int64_t start_us = esp_timer_get_time();
+            if (!wasm_runtime_call_wasm(exec_env, fn_tick, 0, nullptr)) {
+                snprintf(s_app_error, sizeof(s_app_error), "app_tick: %s",
+                         wasm_runtime_get_exception(inst));
+                error = s_app_error;
+                break;
             }
-            prev_start_us = start_us;
+            const int64_t end_us = esp_timer_get_time();
+
+            // Phase 4 由来の計測(常設): 最初の kJitterSamples 回の統計
+            if (sample_idx < kJitterSamples) {
+                if (prev_start_us != 0) {
+                    s_intervals_us[sample_idx] = (uint32_t)(start_us - prev_start_us);
+                    s_durations_us[sample_idx] = (uint32_t)(end_us - start_us);
+                    sample_idx++;
+                    if (sample_idx == kJitterSamples) {
+                        log_stats("tick interval (target 100000)", s_intervals_us,
+                                  kJitterSamples);
+                        log_stats("app_tick duration", s_durations_us, kJitterSamples);
+                    }
+                }
+                prev_start_us = start_us;
+            }
+
+            vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(100));
         }
 
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(100));
-    }
+        // 正常停止時のみ、export されていれば app_exit() を呼ぶ(結果は不問)
+        if (!error && fn_exit) {
+            if (!wasm_runtime_call_wasm(exec_env, fn_exit, 0, nullptr)) {
+                ESP_LOGW(TAG, "app: app_exit trapped: %s",
+                         wasm_runtime_get_exception(inst));
+            }
+        }
+    } while (false);
+
+    // 破棄は必ずこの順序: exec_env → instance → module → wasm バッファ
+    if (exec_env) wasm_runtime_destroy_exec_env(exec_env);
+    if (inst) wasm_runtime_deinstantiate(inst);
+    if (module) wasm_runtime_unload(module);
+    if (wasm_buf) free(wasm_buf);
+
+    ESP_LOGI(TAG, "app: stopped (%s), free heap %u (at start %u), largest block %u",
+             error ? error : "ok", (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_at_start,
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+
+    AppStoppedCb cb = s_on_stopped;
+    s_app_state.store(AppState::Idle);
+    if (cb) cb(error);
+    return nullptr;
 }
 
 } // namespace
 
-bool run_demo()
+bool app_start(const char* path, AppStoppedCb on_stopped)
 {
+    AppState expected = AppState::Idle;
+    if (!s_app_state.compare_exchange_strong(expected, AppState::Running)) {
+        ESP_LOGW(TAG, "app_start: another app is still active");
+        return false;
+    }
+    strlcpy(s_app_path, path, sizeof(s_app_path));
+    s_on_stopped = on_stopped;
+    s_app_error[0] = '\0';
+
     esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
     cfg.stack_size = 16 * 1024;
-    cfg.thread_name = "wasm_demo";
+    cfg.thread_name = "wasm_app";
     cfg.prio = 5;
     esp_pthread_set_cfg(&cfg);
 
     pthread_t th;
-    if (pthread_create(&th, nullptr, demo_thread, nullptr) != 0) {
-        ESP_LOGE(TAG, "failed to create wasm_demo pthread");
+    if (pthread_create(&th, nullptr, app_thread, nullptr) != 0) {
+        ESP_LOGE(TAG, "failed to create wasm_app pthread");
+        s_app_state.store(AppState::Idle);
         return false;
     }
     pthread_detach(th);
     return true;
+}
+
+void app_request_stop()
+{
+    AppState expected = AppState::Running;
+    s_app_state.compare_exchange_strong(expected, AppState::StopRequested);
+}
+
+bool app_is_running()
+{
+    return s_app_state.load() != AppState::Idle;
 }
 
 // WAMR の esp-idf プラットフォーム層は pthread_self() を使うため、

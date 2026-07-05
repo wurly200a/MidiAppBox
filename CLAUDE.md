@@ -306,6 +306,42 @@ Phase 4 で `wasm_runtime_dump_mem_consumption` を見てプール縮小を検�
 
 ---
 
+# Phase 5: SD ロードとランチャー (2026-07-05〜)
+
+目的: /sdcard/apps/ の .wasm をメニューから選択起動し、power_key 短押しで
+メニューに戻る(ユーザー選択済み)。起動↔終了 10 サイクルでリークなしが完了条件。
+
+## 決定事項
+
+- 「メニューへ戻る」= **power_key 短押し**(ユーザー選択)。現状 power_key は
+  外部電源時にキーを監視していない(battery_mode のみ)ので、外部電源でも
+  ポーリングして短押しイベントを拾う拡張を行う(長押し 2s 電源断は電池時のみ、従来どおり)。
+- アプリライフサイクルはホスト所有: `app_start(path, on_stopped)` →
+  100ms tick → `app_request_stop()` → (export されていれば) `app_exit()` →
+  exec_env → instance → module の順に破棄 → バッファ free。
+  ランタイム(`wasm_runtime_full_init`)は起動時に一度だけ(`runtime_init()`)。
+- 初回セットアップ: /sdcard/apps が無ければ作成し、埋め込みのサンプル .wasm を
+  シードする(以後は SD 上のファイルが正)。
+
+## 5A 実施記録 (2026-07-05) — 完了
+
+SD 上の /sdcard/apps/demo.wasm のロード・実行を実機確認。
+
+**重要な障害と根本原因(再発注意):** ランチャービルドで SD マウントが
+`mount_to_vfs failed (0x101=NO_MEM)` で失敗した。カードは SPI で応答しており
+(cmd52/cmd5 の R1 ログ)、原因は **FATFS の VFS 登録が要求する連続ヒープ**
+(`CONFIG_FATFS_SECTOR_4096` × `max_files=8` → FIL バッファ込みで ~38KB の
+一括 calloc)に対し、WAMR の 128KB 静的プール(BSS)がヒープを圧迫して
+最大連続ブロックが 31.7KB しかなかったこと。**WAMR プールを 64KB に縮小**
+(Phase 4 実測 27.5KB 消費なので余裕)して解決。MP3 モードで動いていたのは
+プールがリンカ GC で消えて余裕があったため。
+教訓: 大きな静的バッファを足したら `heap_caps_get_largest_free_block()` も見る。
+
+- SDMMC ホストは現在この個体でタイムアウト(263)し SDSPI フォールバックで
+  マウントしている(MP3 モードも同じ)。以前は SDMMC で通っていたことがあり、
+  ハード状態依存。フォールバックがあるので実害なし。
+- マウントは 400ms 間隔で 3 回リトライ(初回タイムアウト対策)。
+
 # 依存の記録
 
 | 依存 | 追加フェーズ | 理由 |

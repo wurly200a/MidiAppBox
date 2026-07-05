@@ -43,7 +43,6 @@ void native_hostapi_draw_text(wasm_exec_env_t exec_env, int32_t x, int32_t y,
                       const char* str, uint32_t len)
 {
     (void)exec_env;
-    if (!s_screen) return;
 
     char buf[kMaxTextLen + 1];
     if (len > kMaxTextLen) len = kMaxTextLen;
@@ -51,6 +50,10 @@ void native_hostapi_draw_text(wasm_exec_env_t exec_env, int32_t x, int32_t y,
     buf[len] = '\0';
 
     lvgl_port_lock(0);
+    if (!s_screen) {
+        lvgl_port_unlock();
+        return;
+    }
     TextSlot* slot = nullptr;
     for (auto& t : s_texts) {
         if (t.label && t.x == x && t.y == y) { slot = &t; break; }
@@ -78,9 +81,12 @@ void native_hostapi_fill_rect(wasm_exec_env_t exec_env, int32_t x, int32_t y,
                       int32_t w, int32_t h, uint32_t rgb888)
 {
     (void)exec_env;
-    if (!s_screen) return;
 
     lvgl_port_lock(0);
+    if (!s_screen) {
+        lvgl_port_unlock();
+        return;
+    }
     RectSlot* slot = nullptr;
     for (auto& r : s_rects) {
         if (r.rect && r.x == x && r.y == y) { slot = &r; break; }
@@ -127,12 +133,30 @@ NativeSymbol s_native_symbols[] = {
 
 namespace wasmrt {
 
-void hostapi_display_init()
+void hostapi_app_screen_create()
 {
     lvgl_port_lock(0);
+    if (s_screen) {
+        // 前回分が残っていたら作り直す(通常は destroy 済みのはず)
+        lv_obj_delete(s_screen);
+    }
+    for (auto& t : s_texts) t = TextSlot{};
+    for (auto& r : s_rects) r = RectSlot{};
     s_screen = lv_obj_create(nullptr);
     lv_obj_set_style_bg_color(s_screen, lv_color_black(), 0);
     lv_screen_load(s_screen);
+    lvgl_port_unlock();
+}
+
+void hostapi_app_screen_destroy()
+{
+    lvgl_port_lock(0);
+    if (s_screen) {
+        lv_obj_delete(s_screen);
+        s_screen = nullptr;
+        for (auto& t : s_texts) t = TextSlot{};
+        for (auto& r : s_rects) r = RectSlot{};
+    }
     lvgl_port_unlock();
 }
 

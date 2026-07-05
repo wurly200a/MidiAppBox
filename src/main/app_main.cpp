@@ -16,6 +16,7 @@
 #if CONFIG_MIDIBOX_WASM_DEMO
 #include "wasm_runtime.hpp"
 #include "hostapi.hpp"
+#include "launcher.hpp"
 #endif
 
 static const char* TAG = "APP";
@@ -41,15 +42,36 @@ extern "C" void app_main()
     pwr.start_task();
 
 #if CONFIG_MIDIBOX_WASM_DEMO
-    // Phase 2: ホスト API 経由で描画+クリック音を行うデモアプリ(MP3 デモは起動しない)
-    ESP_LOGI(TAG, "Boot mode: WASM demo");
+    // Phase 5: SD 上の .wasm をロードして実行(MP3 デモは起動しない)
+    ESP_LOGI(TAG, "Boot mode: WASM launcher");
     {
         static Display disp;
         disp.init();
         disp.start_lvgl();
+        static Touch touch;
+        touch.init(disp.lvgl_get_disp());
         audio::Audio_Click_Init();
-        wasmrt::hostapi_display_init();
-        wasmrt::run_demo();
+        if (!wasmrt::runtime_init()) {
+            ESP_LOGE(TAG, "WASM runtime init failed");
+        }
+        // SD 準備+アプリ起動は FATFS 用に十分なスタックを持つタスクで行う
+        auto boot_task = [](void*) {
+            vTaskDelay(pdMS_TO_TICKS(500)); // SD 安定待ち(MP3 モードのタイミングに合わせる)
+            char status[64];
+            if (wasmrt::launcher_prepare_sd(status, sizeof(status))) {
+                // Phase 5A: 固定パスのアプリを起動
+                char path[64];
+                snprintf(path, sizeof(path), "%s/demo.wasm", wasmrt::kAppsDir);
+                wasmrt::hostapi_app_screen_create();
+                wasmrt::app_start(path, [](const char* err) {
+                    ESP_LOGI(TAG, "app stopped: %s", err ? err : "ok");
+                });
+            } else {
+                ESP_LOGE(TAG, "SD prepare failed: %s", status);
+            }
+            vTaskDelete(nullptr);
+        };
+        xTaskCreate(boot_task, "wasm_boot", 8192, nullptr, 4, nullptr);
     }
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));
