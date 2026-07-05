@@ -238,6 +238,30 @@ Phase 4 で `wasm_runtime_dump_mem_consumption` を見てプール縮小を検�
   音: SDL audio に生成 PCM。時刻: `clock_gettime(CLOCK_MONOTONIC)`。
 - 完了条件: Phase 2 と同一の .wasm バイナリが Linux 上で同じ動作をする。
 
+### Phase 3 実施記録 (2026-07-05) — 実装完了・動作確認済み
+
+`hosts/linux/` に C の最小ホストを実装。**実機と同一のコミット済み
+`wasm-apps/demo/demo.wasm`(730 bytes)がそのまま動く**ことを確認
+(app_init/app_tick、カウンタ描画、クリック音)。
+
+- ランタイム: WAMR 2.4.0(実機 component と同一タグ)を FetchContent
+  (GIT_SHALLOW)で取得し vmlib としてビルド。構成も実機に合わせ
+  fast interpreter + libc builtin のみ、`Alloc_With_Pool` 128KB。
+- **ホスト API 定義の共有**: `shared/hostapi_defs.h` に X-macro
+  (`HOSTAPI_NATIVE_SYMBOLS`)で名前+WAMR シグネチャを一元化し、実機
+  (`hostapi.cpp`)と Linux(`main.c`)の双方が NativeSymbol テーブルを
+  これから生成する。API の追加・変更は必ずこのヘッダ経由で行うこと。
+- 描画: SDL2(240x320 論理サイズ、2 倍ウィンドウ)+ font8x8(public domain,
+  `hosts/linux/font8x8_basic.h` に取得済み)。実機と同じ (x,y) キーの
+  retained スロット方式で、毎 tick 全スロット再描画。
+- 音: SDL audio キューに実機と同一波形(1kHz 減衰サイン 30ms)の生成 PCM。
+- ビルド/実行手順は `hosts/linux/README.md`。ヘッドレス CI 用には
+  `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy` で起動可。
+
+メモ: tmux pane 1 は idf.py monitor 内のことがある。コマンドを送る前に
+シェルプロンプトか確認する(monitor 内だと入力がシリアルへ流れる)。
+ネットワークが要る作業(curl, FetchContent)は pane 2(ホスト側 bash)で行う。
+
 ## Phase 4: 計測と記録 → `docs/poc-results.md`
 
 計測は実機・release 相当条件を明記(CPU 周波数、最適化レベル、interpreter 種別)。

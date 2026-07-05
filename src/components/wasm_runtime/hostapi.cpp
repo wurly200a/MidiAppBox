@@ -4,6 +4,7 @@
 // 同じ座標への draw_text / fill_rect は既存の LVGL オブジェクトを更新する。
 // スロット数は固定で、あふれたら警告ログを出して無視する(PoC 割り切り)。
 #include "hostapi.hpp"
+#include "hostapi_defs.h"
 
 #include "wasm_export.h"
 #include "lvgl.h"
@@ -38,7 +39,7 @@ RectSlot s_rects[kMaxRectSlots];
 // ---- native implementations (wasm import "env") ----
 // 文字列引数はシグネチャ "*~" により WAMR が境界検証済みのネイティブポインタで渡す。
 
-void native_draw_text(wasm_exec_env_t exec_env, int32_t x, int32_t y,
+void native_hostapi_draw_text(wasm_exec_env_t exec_env, int32_t x, int32_t y,
                       const char* str, uint32_t len)
 {
     (void)exec_env;
@@ -73,7 +74,7 @@ void native_draw_text(wasm_exec_env_t exec_env, int32_t x, int32_t y,
     lvgl_port_unlock();
 }
 
-void native_fill_rect(wasm_exec_env_t exec_env, int32_t x, int32_t y,
+void native_hostapi_fill_rect(wasm_exec_env_t exec_env, int32_t x, int32_t y,
                       int32_t w, int32_t h, uint32_t rgb888)
 {
     (void)exec_env;
@@ -105,23 +106,21 @@ void native_fill_rect(wasm_exec_env_t exec_env, int32_t x, int32_t y,
     lvgl_port_unlock();
 }
 
-void native_play_click(wasm_exec_env_t exec_env)
+void native_hostapi_play_click(wasm_exec_env_t exec_env)
 {
     (void)exec_env;
     audio::Play_Click();
 }
 
-uint32_t native_now_ms(wasm_exec_env_t exec_env)
+uint32_t native_hostapi_now_ms(wasm_exec_env_t exec_env)
 {
     (void)exec_env;
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
+// 登録テーブルは shared/hostapi_defs.h の X-macro から生成(Linux ホストと共通)
 NativeSymbol s_native_symbols[] = {
-    { "hostapi_draw_text", (void*)native_draw_text, "(ii*~)", nullptr },
-    { "hostapi_fill_rect", (void*)native_fill_rect, "(iiiii)", nullptr },
-    { "hostapi_play_click", (void*)native_play_click, "()", nullptr },
-    { "hostapi_now_ms", (void*)native_now_ms, "()i", nullptr },
+    HOSTAPI_NATIVE_SYMBOLS(HOSTAPI_SYMBOL_ENTRY)
 };
 
 } // namespace

@@ -5,3 +5,4 @@ src/managed_components/
 src/sdkconfig.old
 src/sdkconfig
 wasm-apps/*/target/
+hosts/linux/build/
