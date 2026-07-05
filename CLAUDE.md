@@ -274,6 +274,28 @@ Phase 4 で `wasm_runtime_dump_mem_consumption` を見てプール縮小を検�
    `wasm_runtime_dump_mem_consumption` の出力。
 4. 所見: interpreter のままで音楽アプリロジックに足りるか、AOT へ進む判断材料を書く。
 
+### Phase 4 実施記録 (2026-07-05) — 完了
+
+計測結果と所見は **`docs/poc-results.md`** に集約(条件: -Og, 160MHz, fast-interp)。
+ヘッドライン: host→wasm 起動 15.8µs、wasm→host 越境 ~2.5〜3.7µs/回、
+100ms tick の定常ジッタ +10µs 以内、WAMR 実消費 ~27KB(プール 128KB は
+64KB へ縮小可)、interp ループ ~215 cycles/iter。
+**結論: interpreter のままロジック層には十分。AOT は信号処理を wasm に
+持ち込む段になってから。**
+
+実装メモ:
+
+- `wasm-apps/bench/`: 計測用 wasm(`bench_empty`/`bench_hostcall`)。
+  `bench_empty` は LCG 形式(`acc*1664525+i`)——単純な `acc+=i` だと LLVM が
+  閉形式(等差数列の和)に畳んでループが消えるため。
+- demo 起動時に bench が自動実行され、tick ループが最初の 1000 回の
+  起床間隔/実行時間を収集して統計をログする(常設。計測バッファ 8KB)。
+- tick 駆動は `vTaskDelay` → **`vTaskDelayUntil`(絶対時刻基準)に変更**。
+- `wasm_runtime_dump_mem_consumption` は `WAMR_ENABLE_MEMORY_PROFILING=y`
+  ビルドのみ存在(コードは `#if` ガード済み)。WAMR 2.4.0 では同フラグが
+  `-Werror=dangling-pointer` でビルド失敗するため、`src/CMakeLists.txt` で
+  WAMR コンポーネントにのみ `-Wno-dangling-pointer` を付与して回避。
+
 ## 未確定・要実測事項(推測で進めない)
 
 - 初期化後の内部 SRAM 空きヒープ実測値(Phase 1 で取得)。

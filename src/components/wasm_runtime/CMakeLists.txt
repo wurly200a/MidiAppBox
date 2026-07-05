@@ -4,6 +4,7 @@ idf_component_register(
     EMBED_FILES
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../wasm-apps/hello/hello.wasm"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../wasm-apps/demo/demo.wasm"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../wasm-apps/bench/bench.wasm"
     PRIV_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../../../shared"
     PRIV_REQUIRES esp_timer audio
 )
