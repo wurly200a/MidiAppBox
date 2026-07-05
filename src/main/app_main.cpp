@@ -15,6 +15,7 @@
 #include <string>
 #if CONFIG_MIDIBOX_WASM_DEMO
 #include "wasm_runtime.hpp"
+#include "hostapi.hpp"
 #endif
 
 static const char* TAG = "APP";
@@ -40,9 +41,16 @@ extern "C" void app_main()
     pwr.start_task();
 
 #if CONFIG_MIDIBOX_WASM_DEMO
-    // Phase 1: WAMR で埋め込み wasm を実行してログに出すだけ(MP3 デモは起動しない)
-    ESP_LOGI(TAG, "Boot mode: WASM demo (Phase 1 selftest)");
-    wasmrt::run_selftest_task();
+    // Phase 2: ホスト API 経由で描画+クリック音を行うデモアプリ(MP3 デモは起動しない)
+    ESP_LOGI(TAG, "Boot mode: WASM demo");
+    {
+        static Display disp;
+        disp.init();
+        disp.start_lvgl();
+        audio::Audio_Click_Init();
+        wasmrt::hostapi_display_init();
+        wasmrt::run_demo();
+    }
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }

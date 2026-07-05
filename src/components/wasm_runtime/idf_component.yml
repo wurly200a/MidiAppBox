@@ -1,5 +1,6 @@
 version: "0.1.0"
 dependencies:
   espressif/wasm-micro-runtime: "==2.4.0~1"
+  espressif/esp_lvgl_port: "^2.6"
   idf:
     version: ">=5.1"

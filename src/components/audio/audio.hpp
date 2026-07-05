@@ -38,6 +38,13 @@ public:
 
     bool init(uint32_t sample_rate_hz = 44100, uint8_t bits = 16, bool stereo = true) noexcept;
 
+    // I2S だけ初期化する(esp-audio-player のタスクを起こさない軽量経路。
+    // WASM デモモードのクリック音用)
+    bool init_i2s_only(uint32_t sample_rate_hz = 44100, uint8_t bits = 16, bool stereo = true) noexcept;
+
+    // 生成 PCM のクリック音(1kHz 減衰サイン ~30ms)を I2S へ書く
+    bool play_click() noexcept;
+
     // Start playback of a file via audio_player when available (fallback stubs otherwise)
     bool play_file(const std::string& path) noexcept;
     void pause() noexcept;
@@ -88,6 +95,8 @@ private:
 // Optional C-style wrappers mirroring the provided C API names
 extern "C" {
     void Audio_Init(void);
+    void Audio_Click_Init(void);   // I2S のみ初期化(クリック音用)
+    void Play_Click(void);         // クリック音を再生
     void Play_Music(const char* directory, const char* fileName);
     void Music_resume(void);
     void Music_pause(void);

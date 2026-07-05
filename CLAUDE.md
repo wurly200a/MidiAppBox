@@ -191,6 +191,41 @@ AOT・LIB_PTHREAD・LIBC_WASI・APP_FRAMEWORK を無効化(interp + libc builtin
    ホスト側 tick タスク(周期 100ms 程度、アプリ側で 1s を判定)から `app_tick()` を呼ぶ。
 4. 完了条件: 実機の画面にカウンタが 1 秒ごとに更新され、クリック音が鳴る。
 
+### Phase 2 実施記録 (2026-07-05) — 実装完了・実機ログ確認済み
+
+実機で demo.wasm の tick ループが起動し、60 秒以上 trap /エラーなしで動作
+(画面のカウンタ更新とクリック音はユーザーの目視/聴覚確認による)。
+
+実装の要点:
+
+- ホスト API 4 本を `wasm_runtime_register_natives("env", ...)` で登録
+  (`components/wasm_runtime/hostapi.cpp`)。文字列は WAMR シグネチャ `"(ii*~)"` の
+  `*~`(ptr+len)を使い、**WAMR 側で境界検証済みのネイティブポインタを受け取る**
+  (手動の validate_app_addr は不要)。
+- 描画モデル v0: (x,y) をキーにした retained LVGL オブジェクト
+  (text=lv_label / rect=lv_obj)。同一座標への再描画は既存オブジェクトの更新。
+  スロット固定 16+16、あふれは警告ログ。lvgl_port_lock 下で操作。
+- クリック音: audio に `Audio_Click_Init()`(I2S のみ初期化、esp-audio-player の
+  タスクは起こさない)と `Play_Click()`(1kHz 減衰サイン 30ms 生成 PCM、初回生成を
+  static バッファにキャッシュ)を追加。MP3 経路とは排他(wasm モードでは
+  audio_player 不使用)。
+- demo 実行: `wasmrt::run_demo()` が pthread("wasm_demo", stack 16KB)を起こし、
+  app_init() 後に 100ms 周期で app_tick() を呼ぶ(1 秒判定はアプリ側)。
+- `wasm-apps/demo/`: no_std Rust、730 bytes。static mut でカウンタ状態を保持
+  (app_init/app_tick は同一スレッド前提という契約)。
+
+実測値(-Og, 160MHz, fast-interp):
+
+| 項目 | 値 |
+|---|---|
+| バイナリ(wasm モード, LVGL+WAMR 込み) | 710 KB(1MB パーティション内 32% 空き) |
+| demo モジュールロードの malloc 消費 | ~18.5 KB |
+| 全初期化後(Display+LVGL+I2S+WAMR+module)の free heap | **56 KB** |
+| demo.wasm | 730 bytes |
+
+メモ: free heap 56KB はまだ回るが余裕は薄い。WAMR プール 128KB が最大の固定費。
+Phase 4 で `wasm_runtime_dump_mem_consumption` を見てプール縮小を検討する。
+
 ## Phase 3: Linux ホスト
 
 - `hosts/linux/` に C で最小ホストを作成。**ランタイムは Linux 側も WAMR を推奨**:

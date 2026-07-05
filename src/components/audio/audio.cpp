@@ -93,6 +93,33 @@ bool Mp3Player::ensure_i2s(uint32_t rate_hz, uint8_t bits, bool stereo) noexcept
     return true;
 }
 
+bool Mp3Player::init_i2s_only(uint32_t sample_rate_hz, uint8_t bits, bool stereo) noexcept {
+    return ensure_i2s(sample_rate_hz, bits, stereo);
+}
+
+bool Mp3Player::play_click() noexcept {
+    if (!tx_) return false;
+
+    // 1kHz 減衰サイン 30ms @44.1kHz 16bit ステレオ。初回に生成してキャッシュ。
+    constexpr int kSampleRate = 44100;
+    constexpr int kFrames = kSampleRate * 30 / 1000;
+    static int16_t buf[kFrames * 2];
+    static bool generated = false;
+    if (!generated) {
+        constexpr float kFreq = 1000.0f;
+        constexpr float kAmp = 12000.0f;
+        for (int i = 0; i < kFrames; ++i) {
+            float t = (float)i / kSampleRate;
+            float decay = expf(-t * 120.0f);
+            int16_t s = (int16_t)std::lround(kAmp * decay * sinf(2.0f * (float)M_PI * kFreq * t));
+            buf[i * 2] = s;
+            buf[i * 2 + 1] = s;
+        }
+        generated = true;
+    }
+    return i2s_write(buf, sizeof(buf), 100);
+}
+
 bool Mp3Player::reconfig_rate(uint32_t rate_hz, uint32_t bits_cfg, i2s_slot_mode_t ch) noexcept {
     if (!tx_) return false;
     bool stereo = (ch == I2S_SLOT_MODE_STEREO);
@@ -260,6 +287,17 @@ bool Mp3Player::is_paused()  const noexcept {
 extern "C" void Audio_Init(void) {
     if (!g_player) g_player = new Mp3Player();
     g_player->init(44100, 16, true);
+}
+
+extern "C" void Audio_Click_Init(void) {
+    if (!g_player) g_player = new Mp3Player();
+    if (!g_player->init_i2s_only(44100, 16, true)) {
+        ESP_LOGE(TAG, "Audio_Click_Init: I2S init failed");
+    }
+}
+
+extern "C" void Play_Click(void) {
+    if (g_player) g_player->play_click();
 }
 
 extern "C" void Play_Music(const char* directory, const char* fileName) {

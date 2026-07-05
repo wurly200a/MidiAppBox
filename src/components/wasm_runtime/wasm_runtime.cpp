@@ -1,4 +1,5 @@
 #include "wasm_runtime.hpp"
+#include "hostapi.hpp"
 
 #include "wasm_export.h"
 
@@ -14,9 +15,11 @@
 
 static const char* TAG = "WASM";
 
-// EMBED_FILES で埋め込んだ hello.wasm
+// EMBED_FILES で埋め込んだ .wasm
 extern const uint8_t hello_wasm_start[] asm("_binary_hello_wasm_start");
 extern const uint8_t hello_wasm_end[]   asm("_binary_hello_wasm_end");
+extern const uint8_t demo_wasm_start[] asm("_binary_demo_wasm_start");
+extern const uint8_t demo_wasm_end[]   asm("_binary_demo_wasm_end");
 
 // WAMR グローバルヒーププール(内部 SRAM, BSS)
 static uint8_t s_wamr_heap[128 * 1024];
@@ -121,6 +124,103 @@ bool run_selftest()
              (unsigned)esp_get_free_heap_size(), (unsigned)sizeof(s_wamr_heap));
     ESP_LOGI(TAG, "selftest %s", ok ? "PASS" : "FAIL");
     return ok;
+}
+
+// ---- Phase 2: demo ----
+
+namespace {
+
+void* demo_thread(void*)
+{
+    const size_t heap_before = esp_get_free_heap_size();
+
+    RuntimeInitArgs init_args;
+    memset(&init_args, 0, sizeof(init_args));
+    init_args.mem_alloc_type = Alloc_With_Pool;
+    init_args.mem_alloc_option.pool.heap_buf = s_wamr_heap;
+    init_args.mem_alloc_option.pool.heap_size = sizeof(s_wamr_heap);
+
+    if (!wasm_runtime_full_init(&init_args)) {
+        ESP_LOGE(TAG, "demo: wasm_runtime_full_init failed");
+        return nullptr;
+    }
+    if (!hostapi_register_natives()) {
+        wasm_runtime_destroy();
+        return nullptr;
+    }
+
+    char error_buf[128];
+    const uint32_t wasm_size = (uint32_t)(demo_wasm_end - demo_wasm_start);
+    // interpreter はバッファを module 生存中参照する。デモは常駐なので保持し続ける
+    uint8_t* wasm_buf = (uint8_t*)malloc(wasm_size);
+    if (!wasm_buf) {
+        ESP_LOGE(TAG, "demo: malloc for wasm buf failed");
+        wasm_runtime_destroy();
+        return nullptr;
+    }
+    memcpy(wasm_buf, demo_wasm_start, wasm_size);
+
+    wasm_module_t module =
+        wasm_runtime_load(wasm_buf, wasm_size, error_buf, sizeof(error_buf));
+    if (!module) {
+        ESP_LOGE(TAG, "demo: load failed: %s", error_buf);
+        return nullptr;
+    }
+    wasm_module_inst_t inst = wasm_runtime_instantiate(
+        module, 8 * 1024, 8 * 1024, error_buf, sizeof(error_buf));
+    if (!inst) {
+        ESP_LOGE(TAG, "demo: instantiate failed: %s", error_buf);
+        return nullptr;
+    }
+    wasm_exec_env_t exec_env = wasm_runtime_create_exec_env(inst, 8 * 1024);
+    if (!exec_env) {
+        ESP_LOGE(TAG, "demo: create_exec_env failed");
+        return nullptr;
+    }
+
+    wasm_function_inst_t fn_init = wasm_runtime_lookup_function(inst, "app_init");
+    wasm_function_inst_t fn_tick = wasm_runtime_lookup_function(inst, "app_tick");
+    if (!fn_init || !fn_tick) {
+        ESP_LOGE(TAG, "demo: app_init/app_tick not exported");
+        return nullptr;
+    }
+
+    uint32_t argv[1] = {0};
+    if (!wasm_runtime_call_wasm(exec_env, fn_init, 0, argv)) {
+        ESP_LOGE(TAG, "demo: app_init failed: %s", wasm_runtime_get_exception(inst));
+        return nullptr;
+    }
+    ESP_LOGI(TAG, "demo: app_init() = %d, free heap %u (delta %d), tick loop start",
+             (int)argv[0], (unsigned)esp_get_free_heap_size(),
+             (int)(heap_before - esp_get_free_heap_size()));
+
+    while (true) {
+        if (!wasm_runtime_call_wasm(exec_env, fn_tick, 0, nullptr)) {
+            ESP_LOGE(TAG, "demo: app_tick trapped: %s",
+                     wasm_runtime_get_exception(inst));
+            return nullptr;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+} // namespace
+
+bool run_demo()
+{
+    esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
+    cfg.stack_size = 16 * 1024;
+    cfg.thread_name = "wasm_demo";
+    cfg.prio = 5;
+    esp_pthread_set_cfg(&cfg);
+
+    pthread_t th;
+    if (pthread_create(&th, nullptr, demo_thread, nullptr) != 0) {
+        ESP_LOGE(TAG, "failed to create wasm_demo pthread");
+        return false;
+    }
+    pthread_detach(th);
+    return true;
 }
 
 // WAMR の esp-idf プラットフォーム層は pthread_self() を使うため、
