@@ -6,6 +6,7 @@
 #include "sdcard.hpp"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
@@ -186,8 +187,9 @@ void launcher_show(const char* status_msg)
 {
     lvgl_port_lock(0);
     if (!s_menu_screen) create_menu_locked();
-    if (status_msg) lv_label_set_text(s_status_lbl, status_msg);
     rebuild_list_locked();
+    // 呼び出し元のメッセージを優先(再スキャンの汎用メッセージより後に設定)
+    if (status_msg) lv_label_set_text(s_status_lbl, status_msg);
     lv_screen_load(s_menu_screen);
     lvgl_port_unlock();
 }
@@ -202,6 +204,49 @@ void launcher_on_app_stopped(const char* error)
              error ? error : "app stopped");
     launcher_show(msg);
     hostapi_app_screen_destroy();
+}
+
+void launcher_run_cycle_test()
+{
+    char path[96];
+    snprintf(path, sizeof(path), "%s/demo.wasm", kAppsDir);
+
+    ESP_LOGI(TAG, "=== cycle test start: free heap %u largest %u",
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+
+    for (int i = 1; i <= 10; i++) {
+        hostapi_app_screen_create();
+        if (!app_start(path, launcher_on_app_stopped)) {
+            ESP_LOGE(TAG, "cycle %d: app_start failed", i);
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(2000)); // 2 秒動かす
+        app_request_stop();
+        while (app_is_running()) vTaskDelay(pdMS_TO_TICKS(50));
+        ESP_LOGI(TAG, "=== cycle %d done: free heap %u largest %u", i,
+                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+    }
+
+    // 壊れた .wasm がクラッシュせずエラー表示になることを確認
+    char bad[96];
+    snprintf(bad, sizeof(bad), "%s/broken.wasm", kAppsDir);
+    FILE* f = fopen(bad, "wb");
+    if (f) {
+        static const char garbage[] = "this is not a wasm module at all";
+        fwrite(garbage, 1, sizeof(garbage), f);
+        fclose(f);
+        hostapi_app_screen_create();
+        if (app_start(bad, launcher_on_app_stopped)) {
+            while (app_is_running()) vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        remove(bad);
+        ESP_LOGI(TAG, "=== broken.wasm test done: free heap %u",
+                 (unsigned)esp_get_free_heap_size());
+    }
+
+    ESP_LOGI(TAG, "=== cycle test end");
 }
 
 } // namespace wasmrt

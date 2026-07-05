@@ -12,6 +12,7 @@ struct PowerKeyConfig {
     bool       use_internal_pullup= true;        // Recommend true when active-low
     uint32_t   debounce_ms        = 50;          // Debounce
     uint32_t   hold_ms            = 2000;        // Long-press shutdown threshold (ms)
+    uint32_t   short_press_max_ms = 500;         // Release within this = short press
     uint32_t   poll_period_ms     = 10;          // Poll period when using a task
     bool       use_deepsleep_hold = true;        // Keep level during deep sleep after OFF
 };
@@ -30,6 +31,15 @@ public:
     bool is_battery_mode()  const noexcept { return battery_mode_; }
     bool shutdown_issued()  const noexcept { return shutdown_issued_; }
 
+    // Short-press callback (fires on release before short_press_max_ms).
+    // Runs on the power-key task (small stack) — keep the callback tiny
+    // (set a flag / atomic; do NOT call LVGL etc. directly).
+    using ShortPressCb = void (*)(void*);
+    void set_on_short_press(ShortPressCb cb, void* arg) noexcept {
+        on_short_press_ = cb;
+        short_press_arg_ = arg;
+    }
+
     const PowerKeyConfig& config() const noexcept { return cfg_; }
     void set_config(const PowerKeyConfig& cfg) noexcept { cfg_ = cfg; }
 
@@ -45,8 +55,11 @@ private:
     bool       battery_mode_      = false;
     bool       pressed_stable_    = false;
     bool       raw_prev_          = false;
+    bool       press_armed_       = false;  // Seen released state (guards boot-held key)
     TickType_t raw_edge_ts_       = 0;
     TickType_t press_start_       = 0;
+    ShortPressCb on_short_press_  = nullptr;
+    void*      short_press_arg_   = nullptr;
     volatile bool shutdown_issued_ = false;
     TaskHandle_t task_            = nullptr;
 };

@@ -54,6 +54,9 @@ extern "C" void app_main()
         if (!wasmrt::runtime_init()) {
             ESP_LOGE(TAG, "WASM runtime init failed");
         }
+        // power_key 短押し = ホームボタン(実行中アプリに停止要求 → メニュー復帰)。
+        // コールバックは power_key タスク(小スタック)上なので atomic 操作のみ。
+        pwr.set_on_short_press([](void*) { wasmrt::app_request_stop(); }, nullptr);
         // SD 準備+メニュー表示は FATFS 用に十分なスタックを持つタスクで行う
         auto boot_task = [](void*) {
             vTaskDelay(pdMS_TO_TICKS(500)); // SD 安定待ち
@@ -61,6 +64,11 @@ extern "C" void app_main()
             if (!wasmrt::launcher_prepare_sd(status, sizeof(status))) {
                 ESP_LOGE(TAG, "SD prepare failed: %s", status);
             }
+#if CONFIG_MIDIBOX_WASM_CYCLE_TEST
+            else {
+                wasmrt::launcher_run_cycle_test();
+            }
+#endif
             // 失敗時もメニューは出す(エラー表示付き・空リスト)
             wasmrt::launcher_show(status);
             vTaskDelete(nullptr);

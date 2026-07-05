@@ -419,9 +419,10 @@ void* app_thread(void*)
              (unsigned)heap_at_start,
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
 
-    AppStoppedCb cb = s_on_stopped;
+    // コールバック完了後に Idle へ遷移する(Idle を見て次のアプリを起動する側と、
+    // コールバック内の画面後始末が競合しないように)
+    if (s_on_stopped) s_on_stopped(error);
     s_app_state.store(AppState::Idle);
-    if (cb) cb(error);
     return nullptr;
 }
 

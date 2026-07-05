@@ -8,4 +8,13 @@ menu "MidiAppBox"
             app_main runs the embedded wasm module via WAMR and logs the
             result instead of starting the MP3 player demo.
 
+    config MIDIBOX_WASM_CYCLE_TEST
+        bool "Run app start/stop cycle test at boot (leak check)"
+        depends on MIDIBOX_WASM_DEMO
+        default n
+        help
+            Before showing the launcher menu, automatically run 10
+            start/stop cycles of demo.wasm (logging free heap per cycle)
+            and a corrupted-wasm load test. For Phase 5C verification.
+
 endmenu

@@ -87,23 +87,36 @@ void PowerKey::init() noexcept {
 }
 
 void PowerKey::poll() noexcept {
-    if (!battery_mode_ || shutdown_issued_) return;
+    // Monitor the key in both battery and external-power modes so that
+    // short-press events work; the long-press power-off remains
+    // battery-mode-only (external power cannot be cut via the latch anyway).
+    if (shutdown_issued_) return;
 
     const bool pressed = debounce_read();
     const TickType_t now = xTaskGetTickCount();
 
     if (pressed) {
-        if (press_start_ == 0) {
+        // Only count presses that started from an observed released state,
+        // so the boot-time press (battery power-on) is not misdetected.
+        if (press_armed_ && press_start_ == 0) {
             press_start_ = now; // start of stable press
         }
-        const uint32_t held_ms = pdTICKS_TO_MS(now - press_start_);
-        if (held_ms >= cfg_.hold_ms) {
-            // Power off immediately when threshold is reached, even if still pressed
-            cut_latch_and_maybe_sleep();
+        if (battery_mode_ && press_start_ != 0) {
+            const uint32_t held_ms = pdTICKS_TO_MS(now - press_start_);
+            if (held_ms >= cfg_.hold_ms) {
+                // Power off immediately when threshold is reached
+                cut_latch_and_maybe_sleep();
+            }
         }
     } else {
-        // Not pressed: reset continuous-press timer
-        press_start_ = 0;
+        if (press_start_ != 0) {
+            const uint32_t held_ms = pdTICKS_TO_MS(now - press_start_);
+            if (held_ms <= cfg_.short_press_max_ms && on_short_press_) {
+                on_short_press_(short_press_arg_);
+            }
+            press_start_ = 0;
+        }
+        press_armed_ = true; // released state observed; next press counts
     }
 }
 
