@@ -13,6 +13,9 @@
 #include "esp_lvgl_port.h"
 #include <vector>
 #include <string>
+#if CONFIG_MIDIBOX_WASM_DEMO
+#include "wasm_runtime.hpp"
+#endif
 
 static const char* TAG = "APP";
 
@@ -36,6 +39,14 @@ extern "C" void app_main()
     pwr.init();
     pwr.start_task();
 
+#if CONFIG_MIDIBOX_WASM_DEMO
+    // Phase 1: WAMR で埋め込み wasm を実行してログに出すだけ(MP3 デモは起動しない)
+    ESP_LOGI(TAG, "Boot mode: WASM demo (Phase 1 selftest)");
+    wasmrt::run_selftest_task();
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+#else
     Display disp;
     disp.init();
     disp.start_lvgl();
@@ -121,4 +132,5 @@ extern "C" void app_main()
         }
         vTaskDelay(pdMS_TO_TICKS(200));
     }
+#endif // CONFIG_MIDIBOX_WASM_DEMO
 }

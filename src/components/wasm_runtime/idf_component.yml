@@ -1,0 +1,5 @@
+version: "0.1.0"
+dependencies:
+  espressif/wasm-micro-runtime: "==2.4.0~1"
+  idf:
+    version: ">=5.1"

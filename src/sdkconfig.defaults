@@ -2,3 +2,14 @@ CONFIG_IDF_TARGET="esp32s3"
 CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_MAX_LFN=255
 CONFIG_FATFS_API_ENCODING_UTF_8=y
+
+# WASM PoC: boot into WASM demo mode (set =n to restore the MP3 demo)
+CONFIG_MIDIBOX_WASM_DEMO=y
+
+# WAMR trimmed to interpreter + libc builtin only.
+# LIB_PTHREAD (thread mgr) must stay off: with it enabled,
+# wasm_runtime_create_exec_env fails on esp-idf (see CLAUDE.md Phase 1 notes).
+CONFIG_WAMR_ENABLE_AOT=n
+CONFIG_WAMR_ENABLE_LIB_PTHREAD=n
+CONFIG_WAMR_ENABLE_LIBC_WASI=n
+CONFIG_WAMR_ENABLE_APP_FRAMEWORK=n

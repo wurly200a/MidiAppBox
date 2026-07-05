@@ -1,0 +1,11 @@
+menu "MidiAppBox"
+
+    config MIDIBOX_WASM_DEMO
+        bool "Run WASM PoC demo instead of MP3 demo"
+        default n
+        help
+            Enable the WASM proof-of-concept boot mode. When enabled,
+            app_main runs the embedded wasm module via WAMR and logs the
+            result instead of starting the MP3 player demo.
+
+endmenu
