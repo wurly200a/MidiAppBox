@@ -8,8 +8,13 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
 
 - 「小さいターゲットを定めて、テストし、次を計画する」の反復。各フェーズはビルドが通り
   コミット可能な粒度を保つ。
-- ビルド/フラッシュは tmux pane 1(Docker コンテナ内, `idf.py build` / `idf.py flash`)。
-  `tmux send-keys -t .1 '<cmd>' Enter` で送信、`tmux capture-pane -p -t .1` で確認。
+- 開発環境は **herdr**(4 pane): p1=エージェント、**p2=ESP-IDF Docker**
+  (`idf.py build`/`flash`/`monitor`)、**p3=ホスト側作業**(cargo, Linux ホスト,
+  curl 等ネットワークが要るもの)、p4=予備。
+  送信は `herdr pane run <id> '<cmd>'`、確認は `herdr pane read <id> --lines N`、
+  待機は `herdr wait output <id> --match <text> --timeout <ms>`。
+  Docker 起動はリポジトリルートで README のコマンド(`${PWD}` マウントなので
+  pane の cwd を先に合わせること)。
 - Phase 完了まで、ビルド・フラッシュ・モニタ確認を含めて確認なしで自律的に進めてよい。各ステップの結果はログとしてCLAUDE.mdか作業メモに残すこと。
 - 依存追加は最小限。追加時は本ファイル末尾「依存の記録」に理由を残す。
 - 既存の MP3 再生デモは壊さない(起動モードで分岐)。
@@ -32,7 +37,7 @@ ESP-IDF v5.5.1 / C++17 / target esp32s3。プロジェクトルートは `src/`�
 | コンポーネント | 内容 |
 |---|---|
 | `main/app_main.cpp` | NVS→PowerKey→Display→Touch→Ui→Audio init→SD マウント(別タスク)→再生要求の配線→200ms ポーリングのメインループ |
-| `components/display` | SPI(SPI2, 40MHz) + ST7789 240x320 + esp_lvgl_port。LVGL バッファ 240x40 ダブル (~38KB DMA) |
+| `components/display` | SPI(SPI2, 40MHz) + ST7789(パネル native 240x320)+ esp_lvgl_port。**LVGL 論理画面はランドスケープ 320x240**(hres=LCD_V_RES, swap_xy=true。touch も 90° 回転済み)。LVGL バッファ 240x40 ダブル (~38KB DMA) |
 | `components/touch` | esp_lcd_touch(I2C 静電容量) |
 | `components/ui` | LVGL 9.4。ファイル一覧+OK ボタン+ステータスラベル |
 | `components/audio` | chmorgan/esp-audio-player (helix MP3) + I2S std mode (BCLK=48, WS=38, DOUT=47, PCM5101)。`Audio_Init`/`Play_Music` 等の C API |

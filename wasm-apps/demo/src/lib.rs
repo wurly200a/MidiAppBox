@@ -35,8 +35,9 @@ fn format_u32(buf: &mut [u8], mut v: u32) -> &[u8] {
 #[no_mangle]
 pub extern "C" fn app_init() -> i32 {
     unsafe {
-        hostapi_fill_rect(0, 0, 240, 320, 0x10_18_28); // 背景
-        hostapi_fill_rect(0, 0, 240, 40, 0x20_40_a0); // タイトルバー
+        // 画面はランドスケープ 320x240
+        hostapi_fill_rect(0, 0, 320, 240, 0x10_18_28); // 背景
+        hostapi_fill_rect(0, 0, 320, 40, 0x20_40_a0); // タイトルバー
         let title = b"WASM demo (Rust)";
         hostapi_draw_text(12, 12, title.as_ptr(), title.len() as u32);
         let hint = b"counter + click every 1s";

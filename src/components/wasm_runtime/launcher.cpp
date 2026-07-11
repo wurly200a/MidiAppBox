@@ -35,18 +35,30 @@ lv_obj_t* s_menu_screen = nullptr;
 lv_obj_t* s_list_cont = nullptr;
 lv_obj_t* s_status_lbl = nullptr;
 
-// path が存在しなければ埋め込みバイナリを書き込む
+// path が無い、または内容が埋め込みバイナリと異なれば書き込む
+// (サンプルアプリの更新をファーム更新に追従させる。同名以外のファイルには触れない)
 void seed_file(const char* path, const uint8_t* start, const uint8_t* end)
 {
+    const size_t size = (size_t)(end - start);
+
     struct stat st;
-    if (stat(path, &st) == 0) return; // 既にある
+    if (stat(path, &st) == 0 && (size_t)st.st_size == size) {
+        // サイズ一致なら内容も比較(サンプルは ~1KB なので全読み)
+        FILE* rf = fopen(path, "rb");
+        if (rf) {
+            static uint8_t buf[2048];
+            bool same = size <= sizeof(buf) && fread(buf, 1, size, rf) == size &&
+                        memcmp(buf, start, size) == 0;
+            fclose(rf);
+            if (same) return;
+        }
+    }
 
     FILE* f = fopen(path, "wb");
     if (!f) {
         ESP_LOGW(TAG, "seed: cannot create %s", path);
         return;
     }
-    const size_t size = (size_t)(end - start);
     const size_t written = fwrite(start, 1, size, f);
     fclose(f);
     ESP_LOGI(TAG, "seed: wrote %s (%u/%u bytes)", path, (unsigned)written,
@@ -84,17 +96,18 @@ void row_event_cb(lv_event_t* e)
 // lvgl_port_lock 下で呼ぶこと
 void create_menu_locked()
 {
+    // 画面はランドスケープ 320x240(display.cpp: hres=LCD_V_RES, swap_xy)
     s_menu_screen = lv_obj_create(nullptr);
     lv_obj_set_style_bg_color(s_menu_screen, lv_color_hex(0x101418), 0);
 
     lv_obj_t* title = lv_label_create(s_menu_screen);
     lv_label_set_text(title, "WASM Apps (/sdcard/apps)");
     lv_obj_set_style_text_color(title, lv_color_white(), 0);
-    lv_obj_set_pos(title, 10, 10);
+    lv_obj_set_pos(title, 10, 8);
 
     s_list_cont = lv_obj_create(s_menu_screen);
-    lv_obj_set_size(s_list_cont, 220, 230);
-    lv_obj_set_pos(s_list_cont, 10, 36);
+    lv_obj_set_size(s_list_cont, 300, 164);
+    lv_obj_set_pos(s_list_cont, 10, 32);
     lv_obj_set_style_bg_color(s_list_cont, lv_color_hex(0x181e24), 0);
     lv_obj_set_style_border_width(s_list_cont, 0, 0);
     lv_obj_set_style_pad_all(s_list_cont, 6, 0);
@@ -104,9 +117,9 @@ void create_menu_locked()
     s_status_lbl = lv_label_create(s_menu_screen);
     lv_label_set_text(s_status_lbl, "");
     lv_obj_set_style_text_color(s_status_lbl, lv_color_hex(0x90a0b0), 0);
-    lv_obj_set_pos(s_status_lbl, 10, 280);
+    lv_obj_set_pos(s_status_lbl, 10, 204);
     lv_label_set_long_mode(s_status_lbl, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(s_status_lbl, 220);
+    lv_obj_set_width(s_status_lbl, 300);
 }
 
 // lvgl_port_lock 下で呼ぶこと。kAppsDir を読み直して行を作る。

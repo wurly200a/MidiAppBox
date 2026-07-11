@@ -19,12 +19,13 @@ extern "C" {
     fn hostapi_now_ms() -> u32;
 }
 
+// 画面はランドスケープ 320x240
 const NUM_BARS: i32 = 8;
-const BAR_W: i32 = 22;
-const BAR_GAP: i32 = 6;
-const BAR_X0: i32 = (240 - (NUM_BARS * BAR_W + (NUM_BARS - 1) * BAR_GAP)) / 2;
-const BAR_TOP: i32 = 60; // バー上端(固定)
-const BAR_MAX_H: i32 = 200;
+const BAR_W: i32 = 30;
+const BAR_GAP: i32 = 8;
+const BAR_X0: i32 = (320 - (NUM_BARS * BAR_W + (NUM_BARS - 1) * BAR_GAP)) / 2;
+const BAR_TOP: i32 = 50; // バー上端(固定)
+const BAR_MAX_H: i32 = 170;
 const BG: u32 = 0x18_10_20;
 
 static mut RNG: u32 = 0x1234_5678;
@@ -52,7 +53,7 @@ fn bar_color(h: i32) -> u32 {
 #[no_mangle]
 pub extern "C" fn app_init() -> i32 {
     unsafe {
-        hostapi_fill_rect(0, 0, 240, 320, BG); // 背景
+        hostapi_fill_rect(0, 0, 320, 240, BG); // 背景
         let title = b"BARS (wasm)";
         hostapi_draw_text(12, 12, title.as_ptr(), title.len() as u32);
         RNG ^= hostapi_now_ms();

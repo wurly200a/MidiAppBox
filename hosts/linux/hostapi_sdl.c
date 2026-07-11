@@ -17,8 +17,9 @@
 
 #include "font8x8_basic.h"
 
-#define SCREEN_W 240
-#define SCREEN_H 320
+/* 実機と同じランドスケープ 320x240 */
+#define SCREEN_W 320
+#define SCREEN_H 240
 #define WINDOW_SCALE 2
 
 #define MAX_TEXT_SLOTS 16

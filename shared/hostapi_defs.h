@@ -7,6 +7,7 @@
  *               "*~" は (ptr, len) ペアで、WAMR が境界検証済みポインタに変換する。
  *
  * API 契約:
+ *   画面座標系はランドスケープ 320x240(左上原点)。
  *   hostapi_draw_text(x, y, str_ptr, str_len)  UTF-8 文字列を (x,y) に描画。
  *                                              同一座標への再描画は置き換え。
  *   hostapi_fill_rect(x, y, w, h, rgb888)      矩形塗り。色は 0xRRGGBB。
