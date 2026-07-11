@@ -14,6 +14,11 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+
+#ifdef HAVE_SDL_TTF
+#include <SDL_ttf.h>
+#endif
 
 #include "font8x8_basic.h"
 
@@ -42,6 +47,38 @@ static SDL_Window* s_window;
 static SDL_Renderer* s_renderer;
 static SDL_AudioDeviceID s_audio;
 static uint32_t s_start_ms;
+
+#ifdef HAVE_SDL_TTF
+/* 実機(LVGL Montserrat 14, アンチエイリアス)に見た目を近づけるため、
+ * TTF フォントを WINDOW_SCALE 倍のピクセルサイズでラスタライズし、
+ * 論理座標では 1/WINDOW_SCALE で貼る(ウィンドウ実ピクセルで等倍=最良の AA)。
+ * フォントが無い環境では font8x8 にフォールバック。 */
+static TTF_Font* s_font;
+#define TTF_POINT_SIZE 13
+
+static void try_open_font(void)
+{
+    const char* candidates[] = {
+        getenv("MIDIBOX_FONT"), /* 環境変数で差し替え可 */
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    };
+    if (TTF_Init() != 0) {
+        fprintf(stderr, "TTF_Init failed: %s (falling back to font8x8)\n",
+                TTF_GetError());
+        return;
+    }
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); ++i) {
+        if (!candidates[i]) continue;
+        s_font = TTF_OpenFont(candidates[i], TTF_POINT_SIZE * WINDOW_SCALE);
+        if (s_font) {
+            printf("font: %s\n", candidates[i]);
+            return;
+        }
+    }
+    fprintf(stderr, "no TTF font found (falling back to font8x8)\n");
+}
+#endif
 
 static TextSlot s_texts[MAX_TEXT_SLOTS];
 static RectSlot s_rects[MAX_RECT_SLOTS];
@@ -73,6 +110,10 @@ bool host_sdl_init(void)
     }
     SDL_RenderSetLogicalSize(s_renderer, SCREEN_W, SCREEN_H);
 
+#ifdef HAVE_SDL_TTF
+    try_open_font();
+#endif
+
     SDL_AudioSpec want, have;
     SDL_zero(want);
     want.freq = 44100;
@@ -93,6 +134,10 @@ bool host_sdl_init(void)
 
 void host_sdl_shutdown(void)
 {
+#ifdef HAVE_SDL_TTF
+    if (s_font) TTF_CloseFont(s_font);
+    if (TTF_WasInit()) TTF_Quit();
+#endif
     if (s_audio) SDL_CloseAudioDevice(s_audio);
     if (s_renderer) SDL_DestroyRenderer(s_renderer);
     if (s_window) SDL_DestroyWindow(s_window);
@@ -109,6 +154,34 @@ static void draw_char8x8(int32_t x, int32_t y, unsigned char c)
                 SDL_RenderDrawPoint(s_renderer, x + col, y + row);
             }
         }
+    }
+}
+
+/* テキスト描画の共通経路。TTF があればアンチエイリアス描画、無ければ font8x8 */
+static void draw_string(int x, int y, const char* s, uint32_t rgb888)
+{
+#ifdef HAVE_SDL_TTF
+    if (s_font && s[0]) {
+        SDL_Color color = { (Uint8)(rgb888 >> 16), (Uint8)(rgb888 >> 8),
+                            (Uint8)rgb888, 255 };
+        SDL_Surface* surf = TTF_RenderUTF8_Blended(s_font, s, color);
+        if (surf) {
+            SDL_Texture* tex = SDL_CreateTextureFromSurface(s_renderer, surf);
+            if (tex) {
+                SDL_Rect dst = { x, y, surf->w / WINDOW_SCALE,
+                                 surf->h / WINDOW_SCALE };
+                SDL_RenderCopy(s_renderer, tex, NULL, &dst);
+                SDL_DestroyTexture(tex);
+            }
+            SDL_FreeSurface(surf);
+            return;
+        }
+    }
+#endif
+    SDL_SetRenderDrawColor(s_renderer, (rgb888 >> 16) & 0xff, (rgb888 >> 8) & 0xff,
+                           rgb888 & 0xff, 255);
+    for (size_t k = 0; s[k]; ++k) {
+        draw_char8x8(x + (int)k * 8, y, (unsigned char)s[k]);
     }
 }
 
@@ -137,11 +210,7 @@ void host_sdl_rect(int x, int y, int w, int h, uint32_t rgb888)
 
 void host_sdl_text(int x, int y, const char* s, uint32_t rgb888)
 {
-    SDL_SetRenderDrawColor(s_renderer, (rgb888 >> 16) & 0xff, (rgb888 >> 8) & 0xff,
-                           rgb888 & 0xff, 255);
-    for (size_t k = 0; s[k]; ++k) {
-        draw_char8x8(x + (int)k * 8, y, (unsigned char)s[k]);
-    }
+    draw_string(x, y, s, rgb888);
 }
 
 void host_sdl_present(void)
@@ -192,13 +261,10 @@ void host_sdl_render(void)
         SDL_RenderFillRect(s_renderer, &rect);
     }
 
-    SDL_SetRenderDrawColor(s_renderer, 255, 255, 255, 255);
     for (int i = 0; i < MAX_TEXT_SLOTS; ++i) {
         if (!s_texts[i].used) continue;
         const TextSlot* t = &s_texts[i];
-        for (size_t k = 0; t->text[k]; ++k) {
-            draw_char8x8(t->x + (int32_t)k * 8, t->y, (unsigned char)t->text[k]);
-        }
+        draw_string(t->x, t->y, t->text, 0xffffff);
     }
 
     SDL_RenderPresent(s_renderer);

@@ -40,6 +40,15 @@ target_link_libraries(vmlib PUBLIC pthread m)
 # ---- SDL2 ----
 find_package(SDL2 REQUIRED)
 
+# ---- SDL2_ttf(任意。あればアンチエイリアスのテキスト描画、無ければ font8x8) ----
+find_package(SDL2_ttf QUIET)
+if(NOT SDL2_ttf_FOUND)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(SDL2_TTF_PC QUIET SDL2_ttf)
+    endif()
+endif()
+
 # ---- host executable ----
 add_executable(midibox_host main.c hostapi_sdl.c)
 target_include_directories(midibox_host PRIVATE
@@ -47,3 +56,16 @@ target_include_directories(midibox_host PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../shared
 )
 target_link_libraries(midibox_host PRIVATE vmlib SDL2::SDL2)
+
+if(SDL2_ttf_FOUND)
+    target_compile_definitions(midibox_host PRIVATE HAVE_SDL_TTF)
+    target_link_libraries(midibox_host PRIVATE SDL2_ttf::SDL2_ttf)
+    message(STATUS "SDL2_ttf: found (antialiased text enabled)")
+elseif(SDL2_TTF_PC_FOUND)
+    target_compile_definitions(midibox_host PRIVATE HAVE_SDL_TTF)
+    target_include_directories(midibox_host PRIVATE ${SDL2_TTF_PC_INCLUDE_DIRS})
+    target_link_libraries(midibox_host PRIVATE ${SDL2_TTF_PC_LIBRARIES})
+    message(STATUS "SDL2_ttf: found via pkg-config (antialiased text enabled)")
+else()
+    message(STATUS "SDL2_ttf: not found (falling back to font8x8)")
+endif()

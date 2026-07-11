@@ -5,6 +5,9 @@
 libc builtin のみ)を FetchContent で取得してビルドする。
 
 依存: cmake (>=3.16), gcc, libsdl2-dev
+任意: libsdl2-ttf-dev(あればシステムフォントでアンチエイリアス描画。
+無ければ font8x8 ビットマップにフォールバック。`MIDIBOX_FONT` 環境変数で
+フォントファイルを指定可能)
 
 ```
 cd hosts/linux

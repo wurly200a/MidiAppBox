@@ -246,7 +246,7 @@ static void menu_render(int hover)
         if (y + MENU_ROW_H > MENU_STATUS_Y) break; /* あふれは表示しない(PoC) */
         host_sdl_rect(MENU_ROW_X, y, MENU_ROW_W, MENU_ROW_H,
                       (i == hover) ? 0x3a4a60 : 0x2a3340);
-        host_sdl_text(MENU_ROW_X + 8, y + 6, s_apps[i].name, 0xffffff);
+        host_sdl_text(MENU_ROW_X + 8, y + 2, s_apps[i].name, 0xffffff);
     }
 
     host_sdl_text(10, MENU_STATUS_Y, s_status, 0x90a0b0);
