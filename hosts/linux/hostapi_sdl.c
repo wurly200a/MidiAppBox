@@ -52,9 +52,13 @@ bool host_sdl_init(void)
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return false;
     }
+    /* ALLOW_HIGHDPI: ディスプレイスケール環境(ChromeOS 等)でウィンドウサイズと
+     * マウスイベントの単位(ポイント)を一致させる。無いとイベントだけ 1/scale に
+     * なりヒットテストがずれる */
     s_window = SDL_CreateWindow("MidiAppBox WASM host",
                                 SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                SCREEN_W * WINDOW_SCALE, SCREEN_H * WINDOW_SCALE, 0);
+                                SCREEN_W * WINDOW_SCALE, SCREEN_H * WINDOW_SCALE,
+                                SDL_WINDOW_ALLOW_HIGHDPI);
     if (!s_window) {
         fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
         return false;
@@ -106,6 +110,72 @@ static void draw_char8x8(int32_t x, int32_t y, unsigned char c)
             }
         }
     }
+}
+
+/* ---- 直描画ヘルパ(ランチャーメニュー用。retained スロットとは別系統) ---- */
+
+void host_sdl_clear_slots(void)
+{
+    memset(s_texts, 0, sizeof(s_texts));
+    memset(s_rects, 0, sizeof(s_rects));
+}
+
+void host_sdl_begin_frame(uint32_t rgb888)
+{
+    SDL_SetRenderDrawColor(s_renderer, (rgb888 >> 16) & 0xff, (rgb888 >> 8) & 0xff,
+                           rgb888 & 0xff, 255);
+    SDL_RenderClear(s_renderer);
+}
+
+void host_sdl_rect(int x, int y, int w, int h, uint32_t rgb888)
+{
+    SDL_SetRenderDrawColor(s_renderer, (rgb888 >> 16) & 0xff, (rgb888 >> 8) & 0xff,
+                           rgb888 & 0xff, 255);
+    SDL_Rect rect = { x, y, w, h };
+    SDL_RenderFillRect(s_renderer, &rect);
+}
+
+void host_sdl_text(int x, int y, const char* s, uint32_t rgb888)
+{
+    SDL_SetRenderDrawColor(s_renderer, (rgb888 >> 16) & 0xff, (rgb888 >> 8) & 0xff,
+                           rgb888 & 0xff, 255);
+    for (size_t k = 0; s[k]; ++k) {
+        draw_char8x8(x + (int)k * 8, y, (unsigned char)s[k]);
+    }
+}
+
+void host_sdl_present(void)
+{
+    SDL_RenderPresent(s_renderer);
+}
+
+void host_sdl_debug_dump_coords(int wx, int wy, int lx, int ly)
+{
+    int ww = 0, wh = 0, ow = 0, oh = 0;
+    float sx = 1, sy = 1;
+    SDL_Rect vp;
+    SDL_GetWindowSize(s_window, &ww, &wh);
+    SDL_GetRendererOutputSize(s_renderer, &ow, &oh);
+    SDL_RenderGetScale(s_renderer, &sx, &sy);
+    SDL_RenderGetViewport(s_renderer, &vp);
+    printf("click: ev=(%d,%d) win=(%d,%d) out=(%d,%d) scale=(%.2f,%.2f) "
+           "vp=(%d,%d,%d,%d) -> logical=(%d,%d)\n",
+           wx, wy, ww, wh, ow, oh, sx, sy, vp.x, vp.y, vp.w, vp.h, lx, ly);
+    fflush(stdout);
+}
+
+void host_sdl_window_to_logical(int wx, int wy, int* lx, int* ly)
+{
+    /* SDL2 は SDL_RenderSetLogicalSize を設定すると、マウスイベント座標を
+     * 自動で論理座標(SCREEN_W x SCREEN_H)へ変換して届ける
+     * (SDL_RendererEventWatch)。したがってここでは変換せず、クランプのみ行う。
+     * 追加で割ると二重変換になり、ヒットテストが左上 1/4 に縮む。 */
+    if (wx < 0) wx = 0;
+    if (wy < 0) wy = 0;
+    if (wx >= SCREEN_W) wx = SCREEN_W - 1;
+    if (wy >= SCREEN_H) wy = SCREEN_H - 1;
+    *lx = wx;
+    *ly = wy;
 }
 
 void host_sdl_render(void)

@@ -11,6 +11,22 @@ void host_sdl_shutdown(void);
 /* retained スロットの内容を 1 フレーム描画する(main ループから毎 tick) */
 void host_sdl_render(void);
 
+/* アプリの retained スロットを全消去する(アプリ切り替え時。実機の
+ * アプリスクリーン再生成に相当) */
+void host_sdl_clear_slots(void);
+
+/* 直描画ヘルパ(ランチャーメニュー用)。begin_frame → rect/text → present */
+void host_sdl_begin_frame(uint32_t rgb888);
+void host_sdl_rect(int x, int y, int w, int h, uint32_t rgb888);
+void host_sdl_text(int x, int y, const char* s, uint32_t rgb888);
+void host_sdl_present(void);
+
+/* ウィンドウ座標 → 論理座標(320x240)変換(マウスイベント用) */
+void host_sdl_window_to_logical(int wx, int wy, int* lx, int* ly);
+
+/* 座標変換の診断情報を stdout に出す(デバッグ用) */
+void host_sdl_debug_dump_coords(int wx, int wy, int lx, int ly);
+
 /* shared/hostapi_defs.h の X-macro が参照する native_* 実装 */
 void native_hostapi_draw_text(wasm_exec_env_t exec_env, int32_t x, int32_t y,
                               const char* str, uint32_t len);
