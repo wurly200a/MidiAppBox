@@ -6,8 +6,6 @@ CONFIG_FATFS_API_ENCODING_UTF_8=y
 # Audio_Init(47KB) と併存できない。MP3 128kbps=16KB/s に対し 512 で十分
 CONFIG_FATFS_SECTOR_512=y
 
-# WASM PoC: boot into WASM demo mode (set =n to restore the MP3 demo)
-CONFIG_MIDIBOX_WASM_DEMO=y
 
 # WAMR trimmed to interpreter + libc builtin only.
 # LIB_PTHREAD (thread mgr) must stay off: with it enabled,

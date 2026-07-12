@@ -1,68 +1,91 @@
 /*
- * ホスト API の定義(実機 ESP32 ホストと Linux ホストで共有)。
+ * ホスト API v1 の定義(実機 ESP32 ホストと Linux ホストで共有)。
  *
  * X(name, signature):
  *   name      = wasm import 名(module "env")。ネイティブ実装は native_<name>。
  *   signature = WAMR native symbol シグネチャ。
- *               "*~" は (ptr, len) ペアで、WAMR が境界検証済みポインタに変換する。
+ *               "*~" は (ptr, len) ペアで、WAMR が境界検証と app→native の
+ *               アドレス変換を行う(in/out どちらのバッファにも使う)。
  *
- * API 契約:
- *   画面座標系はランドスケープ 320x240(左上原点)。
- *   hostapi_draw_text(x, y, str_ptr, str_len)  UTF-8 文字列を (x,y) に描画。
- *                                              同一座標への再描画は置き換え。
- *   hostapi_fill_rect(x, y, w, h, rgb888)      矩形塗り。色は 0xRRGGBB。
- *                                              同一 (x,y) への再描画は置き換え。
- *   hostapi_play_click()                       クリック音(短い減衰サイン)を再生。
- *   hostapi_now_ms() -> u32                    起動からの経過ミリ秒。
+ * ============================== 共通契約 ==============================
  *
- *   hostapi_poll_event(buf_ptr, buf_len) -> n  (Phase 6A)
+ * - 画面座標系: ランドスケープ 320x240、左上原点、単位ピクセル。
+ * - 文字列 in 引数: (ptr, len) の UTF-8。NUL 終端不要。
+ * - out-buffer: アプリが (buf_ptr, buf_len) を渡し、ホストが書いた量
+ *   (件数または長さ)を戻り値で返す。ホストは buf_len を超えて書かない。
+ * - エラーを返す関数は負数(通常 -1)。アプリの不正入力でトラップさせない。
+ * - アプリのライフサイクル: app_init() → 100ms 周期の app_tick() 反復 →
+ *   (任意 export の app_exit())→ ホストが破棄。すべて同一スレッド。
+ *   破棄時、ホストは再生中のオーディオを必ず停止する。
+ *   アプリ起動時: 描画スロットは空、イベントキューは空、audio は STOPPED。
+ *
+ * ============================== gfx ==============================
+ *
+ * 描画は (x,y) をキーにした retained モデル。同一座標への再描画は
+ * 既存オブジェクトの置き換え(移動・部分消去の API はない)。
+ * スロットは text / rect 各 16。あふれは警告ログの上で無視される。
+ *
+ *   hostapi_draw_text(x, y, str_ptr, str_len)
+ *     UTF-8 文字列を (x,y) に描画。色は白固定(v1)。
+ *   hostapi_fill_rect(x, y, w, h, rgb888)
+ *     矩形塗り。色は 0xRRGGBB。
+ *
+ * ============================== input ==============================
+ *
+ *   hostapi_poll_event(buf_ptr, buf_len) -> n
  *     前回呼び出し以降の入力イベントを buf に書き、書いた件数を返す(0=なし)。
  *     buf は hostapi_event_t の配列(buf_len はバイト数)。ホストは
- *     buf_len / sizeof(hostapi_event_t) 件を上限に書き、入り切らない分は
- *     キューに残して次回返す。戻り値の負数はエラー用に予約(当面未使用)。
+ *     buf_len / 12 件を上限に書き、入り切らない分はキューに残して次回返す。
  *     アプリは tick 先頭で drain する想定。推奨バッファは 16 件分。
  *
- *   hostapi_audio_play(path_ptr, path_len) -> 0/-1  (Phase 6B)
- *     MP3 の再生を開始する。path は「ミュージックルート相対」
- *     (実機 /sdcard/music/、Linux ./sdcard/music/)。".." を含む・"/" で
- *     始まるパスは拒否する(サンドボックス境界)。再生中に呼ぶと現在の曲を
- *     止めて差し替える。成功 0(state=PLAYING)、失敗 -1(state=ERROR)。
+ *   イベント規約(ABI 凍結):
+ *     - hostapi_event_t は 12 バイト固定・リトルエンディアン。サイズ変更は
+ *       しない。拡張は type の追加(アプリは未知 type を無視する契約)と
+ *       param への型依存値で行う。
+ *     - ホスト側キューは深さ 16。溢れたら最古から捨てる。
+ *     - 対応する DOWN を配送していない UP はホストが捨てる(アプリを起動
+ *       したタップの UP が漏れないように)。アプリ側も DOWN なしの UP は
+ *       無視してよい。
+ *     - v1 はシングルタッチ(マルチタッチは将来 param=finger id で拡張)。
+ *
+ * ============================== audio ==============================
+ *
+ * MP3 のデコード・出力はネイティブ側。アプリは制御のみを持つ。
+ * path は「ミュージックルート相対」(実機 /sdcard/music/、Linux
+ * ./sdcard/music/)。".." を含む・"/" で始まるパスは拒否(サンドボックス境界)。
+ *
+ *   hostapi_audio_play(path_ptr, path_len) -> 0/-1
+ *     再生開始。再生中に呼ぶと現在の曲を止めて差し替える。
+ *     成功 0(state=PLAYING)、失敗 -1(state=ERROR)。
  *   hostapi_audio_ctrl(cmd) -> 0/-1
- *     HOSTAPI_AUDIO_CMD_*。現在の状態で無効なコマンド(停止中の PAUSE 等)は
- *     何もせず -1(トラップしない)。STOP は任意の状態から STOPPED へ。
+ *     HOSTAPI_AUDIO_CMD_*。現在の状態で無効なコマンド(停止中の PAUSE 等)
+ *     は何もせず -1。STOP は任意の状態から STOPPED へ。
  *   hostapi_audio_set_volume(v)
  *     音量 0..100(範囲外はクランプ)。曲をまたいで持続する。
  *   hostapi_audio_get_state() -> HOSTAPI_AUDIO_*
- *     FINISHED(自然終了)は読み取りでは消えず、次の play か STOP まで保持。
- *     ERROR も同様に次の play まで保持。
+ *     FINISHED(自然終了)は読み取りでは消えず、次の play か STOP まで保持
+ *     (100ms tick のポーリングで取りこぼさないため)。ERROR も同様。
  *
- *   オーディオのライフサイクル契約: アプリ起動時は STOPPED。アプリ破棄時、
- *   ホストは再生中のオーディオを必ず停止する。
+ * ============================== fs ==============================
  *
- *   hostapi_fs_list(idx, buf_ptr, buf_len) -> n  (Phase 6C)
+ *   hostapi_fs_list(idx, buf_ptr, buf_len) -> n
  *     ミュージックルート直下の .mp3 ファイル名を idx(0 始まり)で列挙する。
  *     名前(ルート相対、NUL 終端なし)を buf に書き、その長さを返す。
- *     idx が範囲外なら -1(終端)。アプリにはルート相対名のみ見せる
- *     (サンドボックス境界)。63 バイトを超える名前とサブディレクトリは
+ *     idx が範囲外なら -1(終端)。63 バイトを超える名前とサブディレクトリは
  *     列挙から除外。列挙順はホスト依存だが同一セッション中は安定。
  *     返る名前はそのまま hostapi_audio_play に渡せる。
  *
- * 入力イベント規約(v1 で凍結する ABI):
- *   - レコードは 12 バイト固定・リトルエンディアン(WASM 仕様と一致)。
- *     サイズ変更は破壊的変更なので行わない。拡張は type の追加
- *     (アプリは未知の type を無視する契約)と param への型依存値で行う。
- *   - ホスト側キューは深さ 16。溢れたら最古から捨てる(警告ログ)。
- *     キューはアプリ起動時に空で始まり、アプリ破棄で消える。
- *   - 対応する DOWN を配送していない UP はホストが捨てる(アプリを起動した
- *     タップの UP がアプリに漏れないように)。アプリ側も DOWN なしの UP は
- *     無視してよい。
- *   - v1 はシングルタッチ(マルチタッチは将来 param=finger id で拡張)。
+ * ============================== misc ==============================
+ *
+ *   hostapi_play_click()   クリック音(短い減衰サイン)を再生。
+ *                          MP3 再生との同時使用は将来の音源 API で整理予定。
+ *   hostapi_now_ms() -> u32  起動からの経過ミリ秒(イベントの time_ms と同一時基)。
  */
 #pragma once
 
 #include <stdint.h>
 
-/* 12 bytes, align 4。フィールドはリトルエンディアン */
+/* 入力イベント。12 bytes, align 4。フィールドはリトルエンディアン(ABI 凍結) */
 typedef struct {
     uint16_t type;    /* HOSTAPI_EV_* */
     uint16_t param;   /* type 依存の追加値。TOUCH_* では 0 */
@@ -78,14 +101,14 @@ enum {
     /* 将来: TOUCH_MOVE, KEY, ... 追加は非破壊 */
 };
 
-/* hostapi_audio_ctrl のコマンド (Phase 6B) */
+/* hostapi_audio_ctrl のコマンド */
 enum {
     HOSTAPI_AUDIO_CMD_PAUSE  = 1,
     HOSTAPI_AUDIO_CMD_RESUME = 2,
     HOSTAPI_AUDIO_CMD_STOP   = 3,
 };
 
-/* hostapi_audio_get_state の状態 (Phase 6B) */
+/* hostapi_audio_get_state の状態 */
 enum {
     HOSTAPI_AUDIO_STOPPED  = 0,
     HOSTAPI_AUDIO_PLAYING  = 1,
@@ -94,17 +117,25 @@ enum {
     HOSTAPI_AUDIO_ERROR    = 4, /* play 失敗。次の play まで保持 */
 };
 
+/* v1 シンボル一覧(グループ: gfx / input / audio / fs / misc)。
+ * v0 の 4 関数(draw_text, fill_rect, play_click, now_ms)はシグネチャ・
+ * 挙動とも v0 から不変。 */
 #define HOSTAPI_NATIVE_SYMBOLS(X)         \
+    /* gfx */                             \
     X(hostapi_draw_text, "(ii*~)")        \
     X(hostapi_fill_rect, "(iiiii)")       \
-    X(hostapi_play_click, "()")           \
-    X(hostapi_now_ms, "()i")              \
+    /* input */                           \
     X(hostapi_poll_event, "(*~)i")        \
+    /* audio */                           \
     X(hostapi_audio_play, "(*~)i")        \
     X(hostapi_audio_ctrl, "(i)i")         \
     X(hostapi_audio_set_volume, "(i)")    \
     X(hostapi_audio_get_state, "()i")     \
-    X(hostapi_fs_list, "(i*~)i")
+    /* fs */                              \
+    X(hostapi_fs_list, "(i*~)i")          \
+    /* misc */                            \
+    X(hostapi_play_click, "()")           \
+    X(hostapi_now_ms, "()i")
 
 /* NativeSymbol 配列の初期化子を生成するヘルパ */
 #define HOSTAPI_SYMBOL_ENTRY(name, sig) { #name, (void*)native_##name, sig, NULL },

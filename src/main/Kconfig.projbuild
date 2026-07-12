@@ -1,20 +1,12 @@
 menu "MidiAppBox"
 
-    config MIDIBOX_WASM_DEMO
-        bool "Run WASM PoC demo instead of MP3 demo"
-        default n
-        help
-            Enable the WASM proof-of-concept boot mode. When enabled,
-            app_main runs the embedded wasm module via WAMR and logs the
-            result instead of starting the MP3 player demo.
-
     config MIDIBOX_WASM_CYCLE_TEST
         bool "Run app start/stop cycle test at boot (leak check)"
-        depends on MIDIBOX_WASM_DEMO
         default n
         help
             Before showing the launcher menu, automatically run 10
-            start/stop cycles of demo.wasm (logging free heap per cycle)
-            and a corrupted-wasm load test. For Phase 5C verification.
+            start/stop cycles of mp3player.wasm with playback forced
+            mid-cycle (logging free heap per cycle) and a corrupted-wasm
+            load test. For leak verification (Phase 5C/6B).
 
 endmenu

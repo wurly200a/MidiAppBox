@@ -508,6 +508,27 @@ mp3player.wasm(2942B)を本命のプレーヤーに拡張。両ホストで全�
 (静止画 9 枚: タップ再生→自動次曲→末尾停止→PAUSED、Linux の 8 曲リスト/
 スクロール/エラー 2 種)。
 
+## 6D 実施記録 (2026-07-12) — 完了・Phase 6 完了
+
+旧 MP3 デモモードを削除してランチャーに一本化し、hostapi_defs.h を v1 として整理。
+
+- **削除**: Kconfig `MIDIBOX_WASM_DEMO`(分岐ごと)、`components/ui`(旧デモ専用)、
+  app_main の #else 経路。main の REQUIRES は power_key/display/touch/audio のみに縮小。
+  `MIDIBOX_WASM_CYCLE_TEST` は depends を外して存続(リーク検証用)。
+- **hostapi_defs.h v1**: gfx / input / audio / fs / misc にグループ化し、共通契約
+  (座標系、文字列規約、out-buffer 規約、負数エラー・非トラップ方針、
+  ライフサイクル+オーディオ停止契約、アプリ起動時の初期状態)をヘッダに集約。
+  v0 の 4 関数はシグネチャ・挙動とも不変(X-macro の並び替えのみ。登録は名前
+  ベースなので ABI 影響なし)。
+- **hello/bench の扱いを明確化**: app_tick を export しないテストモジュールで
+  あり、ランチャーアプリではない。ランチャーは「app_init/app_tick not exported」
+  をメニューに表示して優雅に拒否する(両ホストで確認)。`run_selftest`/`run_bench`
+  はユーティリティとして存続(現在は未配線)。
+- **最終回帰**: Linux はメニューから 6 アプリ(4 本動作+hello/bench の拒否)、
+  実機は 4 アプリ起動→短押し復帰(各 free heap 57,672 で一定)+
+  mp3player 再生中終了で音停止。エビデンス: `~/ビデオ/demo_224403.mp4`(実機)、
+  スクリーンショット一式(Linux)。
+
 # 依存の記録
 
 | 依存 | 追加フェーズ | 理由 |
