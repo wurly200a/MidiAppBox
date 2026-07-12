@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <dirent.h>
 
 static const char* TAG = "WASM/API";
 
@@ -281,6 +282,43 @@ int32_t native_hostapi_audio_get_state(wasm_exec_env_t exec_env)
     (void)exec_env;
     audio_refresh_finished();
     return s_audio_state.load();
+}
+
+// ---- ファイル列挙 (Phase 6C) ----
+// ミュージックルート直下の .mp3 を idx で列挙。ホスト側に状態を持たず
+// 毎回 readdir で idx 番目を探す(曲数は高々数十の想定)。
+bool has_mp3_ext(const char* name)
+{
+    const size_t len = strlen(name);
+    return len > 4 && strcasecmp(name + len - 4, ".mp3") == 0;
+}
+
+int32_t native_hostapi_fs_list(wasm_exec_env_t exec_env, int32_t idx,
+                               char* buf, uint32_t buf_len)
+{
+    (void)exec_env;
+    if (idx < 0) return -1;
+
+    DIR* dir = opendir(kMusicRoot);
+    if (!dir) return -1;
+
+    int32_t found = -1;
+    int32_t count = 0;
+    while (dirent* ent = readdir(dir)) {
+        if (ent->d_type == DT_DIR) continue;
+        if (!has_mp3_ext(ent->d_name)) continue;
+        const size_t name_len = strlen(ent->d_name);
+        if (name_len > 63) continue; // 契約: 63 バイト超は列挙から除外
+        if (count == idx) {
+            const uint32_t n = (name_len < buf_len) ? name_len : buf_len;
+            memcpy(buf, ent->d_name, n);
+            found = (int32_t)n;
+            break;
+        }
+        count++;
+    }
+    closedir(dir);
+    return found;
 }
 
 // buf は WAMR 境界検証済み(シグネチャ "*~")。書いた件数を返す。

@@ -33,6 +33,10 @@ extern const uint8_t mp3player_wasm_end[]   asm("_binary_mp3player_wasm_end");
 // 検証用 MP3(hostapi_audio_* のミュージックルートへシード)
 extern const uint8_t test_mp3_start[] asm("_binary_test_mp3_start");
 extern const uint8_t test_mp3_end[]   asm("_binary_test_mp3_end");
+extern const uint8_t tune_down_mp3_start[] asm("_binary_tune_down_mp3_start");
+extern const uint8_t tune_down_mp3_end[]   asm("_binary_tune_down_mp3_end");
+extern const uint8_t tune_duo_mp3_start[] asm("_binary_tune_duo_mp3_start");
+extern const uint8_t tune_duo_mp3_end[]   asm("_binary_tune_duo_mp3_end");
 
 namespace {
 
@@ -215,6 +219,8 @@ bool launcher_prepare_sd(char* status, size_t status_len)
         ESP_LOGW(TAG, "cannot create /sdcard/music");
     } else {
         seed_file("/sdcard/music/test.mp3", test_mp3_start, test_mp3_end);
+        seed_file("/sdcard/music/tune_down.mp3", tune_down_mp3_start, tune_down_mp3_end);
+        seed_file("/sdcard/music/tune_duo.mp3", tune_duo_mp3_start, tune_duo_mp3_end);
     }
 
     snprintf(status, status_len, "SD ready");

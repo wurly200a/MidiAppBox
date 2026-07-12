@@ -39,6 +39,14 @@
  *   オーディオのライフサイクル契約: アプリ起動時は STOPPED。アプリ破棄時、
  *   ホストは再生中のオーディオを必ず停止する。
  *
+ *   hostapi_fs_list(idx, buf_ptr, buf_len) -> n  (Phase 6C)
+ *     ミュージックルート直下の .mp3 ファイル名を idx(0 始まり)で列挙する。
+ *     名前(ルート相対、NUL 終端なし)を buf に書き、その長さを返す。
+ *     idx が範囲外なら -1(終端)。アプリにはルート相対名のみ見せる
+ *     (サンドボックス境界)。63 バイトを超える名前とサブディレクトリは
+ *     列挙から除外。列挙順はホスト依存だが同一セッション中は安定。
+ *     返る名前はそのまま hostapi_audio_play に渡せる。
+ *
  * 入力イベント規約(v1 で凍結する ABI):
  *   - レコードは 12 バイト固定・リトルエンディアン(WASM 仕様と一致)。
  *     サイズ変更は破壊的変更なので行わない。拡張は type の追加
@@ -95,7 +103,8 @@ enum {
     X(hostapi_audio_play, "(*~)i")        \
     X(hostapi_audio_ctrl, "(i)i")         \
     X(hostapi_audio_set_volume, "(i)")    \
-    X(hostapi_audio_get_state, "()i")
+    X(hostapi_audio_get_state, "()i")     \
+    X(hostapi_fs_list, "(i*~)i")
 
 /* NativeSymbol 配列の初期化子を生成するヘルパ */
 #define HOSTAPI_SYMBOL_ENTRY(name, sig) { #name, (void*)native_##name, sig, NULL },

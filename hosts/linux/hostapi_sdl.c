@@ -15,6 +15,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <dirent.h>
+#include <sys/stat.h>
 
 #ifdef HAVE_SDL_TTF
 #include <SDL_ttf.h>
@@ -231,6 +233,49 @@ int32_t native_hostapi_audio_get_state(wasm_exec_env_t exec_env)
     (void)exec_env;
     audio_refresh_finished();
     return s_audio_state;
+}
+
+/* ---- ファイル列挙 (Phase 6C) ----
+ * 実機側 hostapi.cpp と同じ契約: MUSIC_ROOT 直下の .mp3 を idx で列挙 */
+static bool has_mp3_ext(const char* name)
+{
+    size_t len = strlen(name);
+    return len > 4 && strcasecmp(name + len - 4, ".mp3") == 0;
+}
+
+int32_t native_hostapi_fs_list(wasm_exec_env_t exec_env, int32_t idx,
+                               char* buf, uint32_t buf_len)
+{
+    (void)exec_env;
+    if (idx < 0) return -1;
+
+    DIR* dir = opendir(MUSIC_ROOT);
+    if (!dir) return -1;
+
+    int32_t found = -1;
+    int32_t count = 0;
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+        if (!has_mp3_ext(ent->d_name)) continue;
+        size_t name_len = strlen(ent->d_name);
+        if (name_len > 63) continue; /* 契約: 63 バイト超は列挙から除外 */
+
+        char full[512];
+        snprintf(full, sizeof(full), "%s/%s", MUSIC_ROOT, ent->d_name);
+        struct stat st;
+        if (stat(full, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+
+        if (count == idx) {
+            uint32_t n = (name_len < buf_len) ? (uint32_t)name_len : buf_len;
+            memcpy(buf, ent->d_name, n);
+            found = (int32_t)n;
+            break;
+        }
+        count++;
+    }
+    closedir(dir);
+    return found;
 }
 
 /* ---- 入力イベントキュー (Phase 6A) ----

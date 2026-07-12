@@ -480,6 +480,34 @@ hostapi_audio_play/ctrl/set_volume/get_state の 4 関数を追加(設計はユ�
 一部始終は `~/ビデオ/demo_183116.mp4`。
 Linux は SDL_mixer で同一検証+mixer 無しビルドのエラーパス確認済み。
 
+## 6C 実施記録 (2026-07-12) — 完了
+
+`hostapi_fs_list(idx, buf, len)->n`(`"(i*~)i"`、-1 で終端)を追加し、
+mp3player.wasm(2942B)を本命のプレーヤーに拡張。両ホストで全完了条件を検証済み。
+
+- fs_list はホスト側に状態を持たず毎回 readdir で idx 番目を返す(数十曲想定)。
+  63 バイト超の名前とサブディレクトリは除外。列挙順は readdir 順(ソートなし)。
+- アプリ UI: リスト 6 行+▲▼スクロール+選択ハイライト。retained モデルの
+  スロット収支は rect 15/16・text 15/16(選択ハイライトは行位置固定の rect の
+  色変え、スクロールは text の置き換えで実現 — 移動なしなのでスロットを食わない)。
+- 連続再生はアプリ側: tick で get_state==FINISHED を見て次 idx を play、
+  末尾なら CMD_STOP。実機ログで自然終了→次曲まで 100ms。
+- エラー 3 ケース確認: (a) 曲なし/dir なし → 「no mp3 files in music dir」表示
+  (b) 壊れた MP3 → state: ERROR 表示・クラッシュなし(mpg123 が resync 失敗を報告)
+  (c) 再生中の短押し終了 → 音停止(6B に続き 6C でも確認)
+- 実機シード曲を 3 つに(test.mp3 12s + tune_down/tune_duo 各 6s・32kbps ~24KB)。
+- 10 サイクル(mp3player v2 + 毎サイクル再生中停止): 2 回目以降
+  **64,840 / largest 31,744 で完全一定、リークなし**。
+  注: サイクルログの playing=1 は停止直後(~100ms)のサンプリングで、
+  esp-audio-player の停止が非同期なため。停止自体は有効
+  (以後 Playback finished が一切出ないことで確認)。
+- 教訓(運用): `herdr wait output --match` は高速スクロール行を取りこぼす。
+  完了検知は「新しいブートの安定した末尾状態」をポーリングで見る。
+
+検証エビデンス: `~/ビデオ/demo_204721.mp4`(1:40)と `~/ビデオ/zenn-phase6c/`
+(静止画 9 枚: タップ再生→自動次曲→末尾停止→PAUSED、Linux の 8 曲リスト/
+スクロール/エラー 2 種)。
+
 # 依存の記録
 
 | 依存 | 追加フェーズ | 理由 |
