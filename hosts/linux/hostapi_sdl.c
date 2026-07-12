@@ -21,6 +21,7 @@
 #endif
 
 #include "font8x8_basic.h"
+#include "hostapi_defs.h"
 
 /* 実機と同じランドスケープ 320x240 */
 #define SCREEN_W 320
@@ -30,6 +31,7 @@
 #define MAX_TEXT_SLOTS 16
 #define MAX_RECT_SLOTS 16
 #define MAX_TEXT_LEN 63
+#define EVENT_QUEUE_DEPTH 16
 
 typedef struct {
     bool used;
@@ -82,6 +84,41 @@ static void try_open_font(void)
 
 static TextSlot s_texts[MAX_TEXT_SLOTS];
 static RectSlot s_rects[MAX_RECT_SLOTS];
+
+/* ---- 入力イベントキュー (Phase 6A) ----
+ * 実機と同じ規約: 深さ 16、満杯は最古から捨てる、DOWN 未配送の UP は捨てる。
+ * Linux は main ループ単一スレッドなのでロック不要。 */
+static hostapi_event_t s_evq[EVENT_QUEUE_DEPTH];
+static int s_evq_head = 0;
+static int s_evq_count = 0;
+static bool s_down_delivered = false;
+
+void host_sdl_clear_events(void)
+{
+    s_evq_head = 0;
+    s_evq_count = 0;
+    s_down_delivered = false;
+}
+
+void host_sdl_push_touch(bool down, int x, int y)
+{
+    /* アプリを起動したクリックの UP がアプリに漏れないように */
+    if (!down && !s_down_delivered) return;
+    if (down) s_down_delivered = true;
+
+    if (s_evq_count == EVENT_QUEUE_DEPTH) { /* 満杯: 最古を捨てる */
+        s_evq_head = (s_evq_head + 1) % EVENT_QUEUE_DEPTH;
+        s_evq_count--;
+        fprintf(stderr, "event queue full, dropped oldest\n");
+    }
+    hostapi_event_t* ev = &s_evq[(s_evq_head + s_evq_count) % EVENT_QUEUE_DEPTH];
+    ev->type = down ? HOSTAPI_EV_TOUCH_DOWN : HOSTAPI_EV_TOUCH_UP;
+    ev->param = 0;
+    ev->x = (int16_t)x;
+    ev->y = (int16_t)y;
+    ev->time_ms = SDL_GetTicks() - s_start_ms;
+    s_evq_count++;
+}
 
 bool host_sdl_init(void)
 {
@@ -357,4 +394,20 @@ uint32_t native_hostapi_now_ms(wasm_exec_env_t exec_env)
     (void)exec_env;
     /* SDL_GetTicks は内部で CLOCK_MONOTONIC 相当。起動からの経過 ms を返す */
     return SDL_GetTicks() - s_start_ms;
+}
+
+/* buf は WAMR 境界検証済み(シグネチャ "*~")。書いた件数を返す */
+int32_t native_hostapi_poll_event(wasm_exec_env_t exec_env, char* buf, uint32_t len)
+{
+    (void)exec_env;
+    const uint32_t max_events = len / sizeof(hostapi_event_t);
+    int32_t n = 0;
+    while (n < (int32_t)max_events && s_evq_count > 0) {
+        memcpy(buf + n * sizeof(hostapi_event_t), &s_evq[s_evq_head],
+               sizeof(hostapi_event_t));
+        s_evq_head = (s_evq_head + 1) % EVENT_QUEUE_DEPTH;
+        s_evq_count--;
+        n++;
+    }
+    return n;
 }

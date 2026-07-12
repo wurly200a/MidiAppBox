@@ -27,3 +27,6 @@ cp target/wasm32-unknown-unknown/release/<app>.wasm ./<app>.wasm
 |---|---|
 | `hello/` | Phase 1 の最小テスト。`app_init()` が 42 を返すだけ |
 | `demo/` | Phase 2 デモ。ホスト API で 1 秒ごとにカウンタ描画+クリック音 |
+| `bars/` | Phase 5B デモ。イコライザ風 8 本バー(座標固定・サイズ/色可変) |
+| `bench/` | Phase 4 計測用。`bench_empty`/`bench_hostcall`(ランチャーからは起動不可) |
+| `touch_demo/` | Phase 6A 検証。`hostapi_poll_event` のタッチイベントを座標・DOWN/UP カウントで可視化、ボタンタップでクリック音 |

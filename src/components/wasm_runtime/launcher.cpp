@@ -25,6 +25,8 @@ extern const uint8_t demo_wasm_start[] asm("_binary_demo_wasm_start");
 extern const uint8_t demo_wasm_end[]   asm("_binary_demo_wasm_end");
 extern const uint8_t bars_wasm_start[] asm("_binary_bars_wasm_start");
 extern const uint8_t bars_wasm_end[]   asm("_binary_bars_wasm_end");
+extern const uint8_t touch_demo_wasm_start[] asm("_binary_touch_demo_wasm_start");
+extern const uint8_t touch_demo_wasm_end[]   asm("_binary_touch_demo_wasm_end");
 
 namespace {
 
@@ -191,6 +193,8 @@ bool launcher_prepare_sd(char* status, size_t status_len)
     seed_file(path, demo_wasm_start, demo_wasm_end);
     snprintf(path, sizeof(path), "%s/bars.wasm", kAppsDir);
     seed_file(path, bars_wasm_start, bars_wasm_end);
+    snprintf(path, sizeof(path), "%s/touch_demo.wasm", kAppsDir);
+    seed_file(path, touch_demo_wasm_start, touch_demo_wasm_end);
 
     snprintf(status, status_len, "SD ready");
     return true;

@@ -380,6 +380,57 @@ SD 上の /sdcard/apps/demo.wasm のロード・実行を実機確認。
 - 停止コールバックは **cb 実行後に Idle へ遷移**する順序にした(次アプリの
   画面生成と、cb 内のメニュー復帰・画面破棄の競合防止)。
 
+# Phase 6: MP3 プレーヤーの WASM アプリ化(Host API v0→v1)
+
+課題定義・完了条件はユーザー指示(2026-07-12)による。tick モデル維持、
+入力はイベントキュー型、v0 4 関数は不変、アプリ実装が API 設計を駆動する。
+
+**実機検証の運用(Phase 6 から)**: Web カメラ(/dev/video0)で実機を撮影して
+検証する。録画は `~/ビデオ/rec.sh`(露出・フォーカス自動適用、Enter で停止)。
+herdr の撮影用 pane で起動し、空文字送信(=Enter)で停止する。
+動画・写真は Zenn 記事の素材として `~/ビデオ/zenn-phase6a/` 等に残す。
+
+## 6A 実施記録 (2026-07-12) — 完了
+
+入力イベント API `hostapi_poll_event` を追加し、touch_demo.wasm で両ホスト検証済み。
+
+イベント規約(ユーザー承認済み、ABI 凍結):
+
+- `hostapi_event_t` = **12 バイト固定** `{u16 type, u16 param, i16 x, i16 y, u32 time_ms}`
+  (LE、time_ms は now_ms と同一時基)。type: 1=TOUCH_DOWN, 2=TOUCH_UP。
+  拡張は type 追加(アプリは未知 type を無視する契約)と param で行い、
+  レコードサイズは変えない。
+- `hostapi_poll_event(buf, len)->n`(WAMR シグネチャ `"(*~)i"`)。
+  ホストは len/12 件を上限にキュー先頭から書き、残りは次回。
+- キュー深さ 16、満杯は最古から捨てる。**DOWN 未配送の UP は捨てる**
+  (アプリを起動したタップの UP がアプリに漏れる問題の対策)。
+  キューはアプリ起動時に空、破棄で消滅。
+
+実装の要点:
+
+- 実機の捕捉点は**アプリスクリーンへの LV_EVENT_PRESSED/RELEASED コールバック**
+  (hostapi.cpp)。アプリ実行中だけイベントが流れる経路切替が構造的に成立する。
+  そのため `fill_rect` の lv_obj は CLICKABLE を解除してスクリーンへ素通しする。
+  座標は `lv_event_get_indev`+`lv_indev_get_point`。
+- 生産者(LVGL タスク)/消費者(wasm アプリ pthread)間は portMUX spinlock。
+  Linux は単一スレッドなのでロックなし(main ループの SDL_MOUSEBUTTONDOWN/UP を
+  app_running 時のみ push)。
+- LVGL indev はポーリング ~33ms だが、1 サンプルでも押下を観測すれば
+  PRESSED→RELEASED の両遷移が出るため、33ms 以上のタップなら DOWN/UP が揃う。
+- touch_demo(1549B)は座標表示+DOWN/UP カウント+CLICK ボタン(音+色変化)。
+  背景とタイトルバーの (x,y) キー重複に注意(retained モデルでは後勝ち置換)。
+
+検証結果:
+
+- Linux: xdotool の click(DOWN/UP 間隔 ~12ms)で down/up が同数で増加、
+  座標正確、CLICK 音再生。demo/bars 回帰 OK。
+- 実機: タップで座標追従(シリアルの BASIC P(x,y) と画面表示が一致)、
+  連打後 down:11 up:11 で完全一致(タップ長 243ms の例も DOWN/UP 両方配送)。
+  power_key 短押しでメニュー復帰、demo.wasm 回帰 OK。
+  アプリ停止時 free heap 80,980→80,980(開始時と一致、リークなし)。
+- 記事素材: `~/ビデオ/demo_172530.mp4`(フルテイク 4:43)、
+  `~/ビデオ/zenn-phase6a/`(トリム版 phase6a_touch_verification.mp4 と静止画 6 枚)。
+
 # 依存の記録
 
 | 依存 | 追加フェーズ | 理由 |

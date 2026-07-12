@@ -15,6 +15,11 @@ void host_sdl_render(void);
  * アプリスクリーン再生成に相当) */
 void host_sdl_clear_slots(void);
 
+/* 入力イベントキュー (Phase 6A)。main ループがマウスイベントを push し、
+ * アプリが hostapi_poll_event で drain する。アプリ切り替え時に clear */
+void host_sdl_push_touch(bool down, int x, int y);
+void host_sdl_clear_events(void);
+
 /* 直描画ヘルパ(ランチャーメニュー用)。begin_frame → rect/text → present */
 void host_sdl_begin_frame(uint32_t rgb888);
 void host_sdl_rect(int x, int y, int w, int h, uint32_t rgb888);
@@ -34,3 +39,4 @@ void native_hostapi_fill_rect(wasm_exec_env_t exec_env, int32_t x, int32_t y,
                               int32_t w, int32_t h, uint32_t rgb888);
 void native_hostapi_play_click(wasm_exec_env_t exec_env);
 uint32_t native_hostapi_now_ms(wasm_exec_env_t exec_env);
+int32_t native_hostapi_poll_event(wasm_exec_env_t exec_env, char* buf, uint32_t len);

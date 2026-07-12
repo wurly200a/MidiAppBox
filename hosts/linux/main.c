@@ -193,6 +193,7 @@ static bool app_load(const char* path, App* a)
         }
 
         host_sdl_clear_slots(); /* 実機のアプリスクリーン再生成に相当 */
+        host_sdl_clear_events();
         uint32_t argv[1] = {0};
         if (!wasm_runtime_call_wasm(a->exec_env, fn_init, 0, argv)) {
             snprintf(s_status, sizeof(s_status), "app_init: %s",
@@ -227,6 +228,7 @@ static void app_unload(App* a, bool clean_stop)
     free(a->buf);
     memset(a, 0, sizeof(*a));
     host_sdl_clear_slots();
+    host_sdl_clear_events();
     printf("app stopped\n");
 }
 
@@ -336,6 +338,13 @@ int main(int argc, char** argv)
                     } else {
                         quit = true; /* メニューで ESC = 終了 */
                     }
+                } else if (app_running && (ev.type == SDL_MOUSEBUTTONDOWN ||
+                                           ev.type == SDL_MOUSEBUTTONUP) &&
+                           ev.button.button == SDL_BUTTON_LEFT) {
+                    /* 実機のタッチ DOWN/UP 相当としてアプリのキューへ */
+                    int lx, ly;
+                    host_sdl_window_to_logical(ev.button.x, ev.button.y, &lx, &ly);
+                    host_sdl_push_touch(ev.type == SDL_MOUSEBUTTONDOWN, lx, ly);
                 } else if (!app_running && !single_mode &&
                            ev.type == SDL_MOUSEMOTION) {
                     int lx, ly;
