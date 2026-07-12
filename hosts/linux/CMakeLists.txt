@@ -49,6 +49,15 @@ if(NOT SDL2_ttf_FOUND)
     endif()
 endif()
 
+# ---- SDL2_mixer(Phase 6B: MP3 再生。無ければ audio_play が常に ERROR) ----
+find_package(SDL2_mixer QUIET)
+if(NOT SDL2_mixer_FOUND)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(SDL2_MIXER_PC QUIET SDL2_mixer)
+    endif()
+endif()
+
 # ---- host executable ----
 add_executable(midibox_host main.c hostapi_sdl.c)
 target_include_directories(midibox_host PRIVATE
@@ -68,4 +77,17 @@ elseif(SDL2_TTF_PC_FOUND)
     message(STATUS "SDL2_ttf: found via pkg-config (antialiased text enabled)")
 else()
     message(STATUS "SDL2_ttf: not found (falling back to font8x8)")
+endif()
+
+if(SDL2_mixer_FOUND)
+    target_compile_definitions(midibox_host PRIVATE HAVE_SDL_MIXER)
+    target_link_libraries(midibox_host PRIVATE SDL2_mixer::SDL2_mixer)
+    message(STATUS "SDL2_mixer: found (MP3 playback enabled)")
+elseif(SDL2_MIXER_PC_FOUND)
+    target_compile_definitions(midibox_host PRIVATE HAVE_SDL_MIXER)
+    target_include_directories(midibox_host PRIVATE ${SDL2_MIXER_PC_INCLUDE_DIRS})
+    target_link_libraries(midibox_host PRIVATE ${SDL2_MIXER_PC_LIBRARIES})
+    message(STATUS "SDL2_mixer: found via pkg-config (MP3 playback enabled)")
+else()
+    message(STATUS "SDL2_mixer: not found (hostapi_audio_play will fail)")
 endif()

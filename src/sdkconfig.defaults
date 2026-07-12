@@ -2,6 +2,9 @@ CONFIG_IDF_TARGET="esp32s3"
 CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_MAX_LFN=255
 CONFIG_FATFS_API_ENCODING_UTF_8=y
+# Phase 6B: sector 4096 だと VFS 登録の連続ヒープ消費が max_files×4KB 級になり、
+# Audio_Init(47KB) と併存できない。MP3 128kbps=16KB/s に対し 512 で十分
+CONFIG_FATFS_SECTOR_512=y
 
 # WASM PoC: boot into WASM demo mode (set =n to restore the MP3 demo)
 CONFIG_MIDIBOX_WASM_DEMO=y

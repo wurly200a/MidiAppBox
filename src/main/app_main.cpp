@@ -50,7 +50,13 @@ extern "C" void app_main()
         disp.start_lvgl();
         static Touch touch;
         touch.init(disp.lvgl_get_disp());
-        audio::Audio_Click_Init();
+        // Phase 6B: hostapi_audio_* のためフル初期化(esp-audio-player タスク起動)。
+        // WAMR との同時搭載が初なので free heap を前後で記録する
+        const size_t heap_before_audio = esp_get_free_heap_size();
+        audio::Audio_Init();
+        ESP_LOGI(TAG, "Audio_Init: free heap %u -> %u (delta %d)",
+                 (unsigned)heap_before_audio, (unsigned)esp_get_free_heap_size(),
+                 (int)(heap_before_audio - esp_get_free_heap_size()));
         if (!wasmrt::runtime_init()) {
             ESP_LOGE(TAG, "WASM runtime init failed");
         }

@@ -4,6 +4,7 @@
 #include "hostapi.hpp"
 
 #include "sdcard.hpp"
+#include "audio.hpp"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
@@ -27,6 +28,11 @@ extern const uint8_t bars_wasm_start[] asm("_binary_bars_wasm_start");
 extern const uint8_t bars_wasm_end[]   asm("_binary_bars_wasm_end");
 extern const uint8_t touch_demo_wasm_start[] asm("_binary_touch_demo_wasm_start");
 extern const uint8_t touch_demo_wasm_end[]   asm("_binary_touch_demo_wasm_end");
+extern const uint8_t mp3player_wasm_start[] asm("_binary_mp3player_wasm_start");
+extern const uint8_t mp3player_wasm_end[]   asm("_binary_mp3player_wasm_end");
+// 検証用 MP3(hostapi_audio_* のミュージックルートへシード)
+extern const uint8_t test_mp3_start[] asm("_binary_test_mp3_start");
+extern const uint8_t test_mp3_end[]   asm("_binary_test_mp3_end");
 
 namespace {
 
@@ -45,12 +51,18 @@ void seed_file(const char* path, const uint8_t* start, const uint8_t* end)
 
     struct stat st;
     if (stat(path, &st) == 0 && (size_t)st.st_size == size) {
-        // サイズ一致なら内容も比較(サンプルは ~1KB なので全読み)
+        // サイズ一致なら内容もチャンク比較(埋め込み MP3 は ~100KB あるため)
         FILE* rf = fopen(path, "rb");
         if (rf) {
             static uint8_t buf[2048];
-            bool same = size <= sizeof(buf) && fread(buf, 1, size, rf) == size &&
-                        memcmp(buf, start, size) == 0;
+            bool same = true;
+            size_t off = 0;
+            while (same && off < size) {
+                const size_t chunk = (size - off < sizeof(buf)) ? size - off : sizeof(buf);
+                same = fread(buf, 1, chunk, rf) == chunk &&
+                       memcmp(buf, start + off, chunk) == 0;
+                off += chunk;
+            }
             fclose(rf);
             if (same) return;
         }
@@ -195,6 +207,15 @@ bool launcher_prepare_sd(char* status, size_t status_len)
     seed_file(path, bars_wasm_start, bars_wasm_end);
     snprintf(path, sizeof(path), "%s/touch_demo.wasm", kAppsDir);
     seed_file(path, touch_demo_wasm_start, touch_demo_wasm_end);
+    snprintf(path, sizeof(path), "%s/mp3player.wasm", kAppsDir);
+    seed_file(path, mp3player_wasm_start, mp3player_wasm_end);
+
+    // hostapi_audio_* のミュージックルートと検証用 MP3 (Phase 6B)
+    if (stat("/sdcard/music", &st) != 0 && mkdir("/sdcard/music", 0775) != 0) {
+        ESP_LOGW(TAG, "cannot create /sdcard/music");
+    } else {
+        seed_file("/sdcard/music/test.mp3", test_mp3_start, test_mp3_end);
+    }
 
     snprintf(status, status_len, "SD ready");
     return true;
@@ -225,8 +246,11 @@ void launcher_on_app_stopped(const char* error)
 
 void launcher_run_cycle_test()
 {
+    // Phase 6B: WAMR + esp-audio-player 同時搭載でのリーク検証。
+    // mp3player.wasm を起動し、「MP3 再生中のままアプリ停止」を毎サイクル行う
+    // (破棄時にホストがオーディオを止める契約の検証を兼ねる)。
     char path[96];
-    snprintf(path, sizeof(path), "%s/demo.wasm", kAppsDir);
+    snprintf(path, sizeof(path), "%s/mp3player.wasm", kAppsDir);
 
     ESP_LOGI(TAG, "=== cycle test start: free heap %u largest %u",
              (unsigned)esp_get_free_heap_size(),
@@ -238,12 +262,16 @@ void launcher_run_cycle_test()
             ESP_LOGE(TAG, "cycle %d: app_start failed", i);
             break;
         }
-        vTaskDelay(pdMS_TO_TICKS(2000)); // 2 秒動かす
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        // アプリがタップで行う再生をホスト側から模擬(テスト専用の直接呼び出し)
+        audio::Music_play_path("/sdcard/music/test.mp3");
+        vTaskDelay(pdMS_TO_TICKS(1500)); // 再生中のまま停止させる
         app_request_stop();
         while (app_is_running()) vTaskDelay(pdMS_TO_TICKS(50));
-        ESP_LOGI(TAG, "=== cycle %d done: free heap %u largest %u", i,
+        ESP_LOGI(TAG, "=== cycle %d done: free heap %u largest %u (playing=%d)", i,
                  (unsigned)esp_get_free_heap_size(),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT),
+                 (int)audio::Music_is_playing());
     }
 
     // 壊れた .wasm がクラッシュせずエラー表示になることを確認

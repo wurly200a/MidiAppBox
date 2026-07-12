@@ -76,7 +76,7 @@ bool SdCard::mount(const char* mount_point) {
 
         esp_vfs_fat_sdmmc_mount_config_t mount_config{};
         mount_config.format_if_mount_failed = false;
-        mount_config.max_files = 8;
+        mount_config.max_files = 4; // 同時オープンは wasm+mp3 程度。FATFS の per-file バッファ節約
         mount_config.allocation_unit_size = 16 * 1024;
 
         sdmmc_card_t* card = nullptr;
@@ -115,7 +115,7 @@ bool SdCard::mount(const char* mount_point) {
 
     esp_vfs_fat_sdmmc_mount_config_t mount_cfg{};
     mount_cfg.format_if_mount_failed = false;
-    mount_cfg.max_files = 8;
+    mount_cfg.max_files = 4; // 同上
     mount_cfg.allocation_unit_size = 16 * 1024;
 
     sdmmc_card_t* card = nullptr;

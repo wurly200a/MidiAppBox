@@ -22,6 +22,23 @@
  *     キューに残して次回返す。戻り値の負数はエラー用に予約(当面未使用)。
  *     アプリは tick 先頭で drain する想定。推奨バッファは 16 件分。
  *
+ *   hostapi_audio_play(path_ptr, path_len) -> 0/-1  (Phase 6B)
+ *     MP3 の再生を開始する。path は「ミュージックルート相対」
+ *     (実機 /sdcard/music/、Linux ./sdcard/music/)。".." を含む・"/" で
+ *     始まるパスは拒否する(サンドボックス境界)。再生中に呼ぶと現在の曲を
+ *     止めて差し替える。成功 0(state=PLAYING)、失敗 -1(state=ERROR)。
+ *   hostapi_audio_ctrl(cmd) -> 0/-1
+ *     HOSTAPI_AUDIO_CMD_*。現在の状態で無効なコマンド(停止中の PAUSE 等)は
+ *     何もせず -1(トラップしない)。STOP は任意の状態から STOPPED へ。
+ *   hostapi_audio_set_volume(v)
+ *     音量 0..100(範囲外はクランプ)。曲をまたいで持続する。
+ *   hostapi_audio_get_state() -> HOSTAPI_AUDIO_*
+ *     FINISHED(自然終了)は読み取りでは消えず、次の play か STOP まで保持。
+ *     ERROR も同様に次の play まで保持。
+ *
+ *   オーディオのライフサイクル契約: アプリ起動時は STOPPED。アプリ破棄時、
+ *   ホストは再生中のオーディオを必ず停止する。
+ *
  * 入力イベント規約(v1 で凍結する ABI):
  *   - レコードは 12 バイト固定・リトルエンディアン(WASM 仕様と一致)。
  *     サイズ変更は破壊的変更なので行わない。拡張は type の追加
@@ -53,12 +70,32 @@ enum {
     /* 将来: TOUCH_MOVE, KEY, ... 追加は非破壊 */
 };
 
-#define HOSTAPI_NATIVE_SYMBOLS(X)      \
-    X(hostapi_draw_text, "(ii*~)")     \
-    X(hostapi_fill_rect, "(iiiii)")    \
-    X(hostapi_play_click, "()")        \
-    X(hostapi_now_ms, "()i")           \
-    X(hostapi_poll_event, "(*~)i")
+/* hostapi_audio_ctrl のコマンド (Phase 6B) */
+enum {
+    HOSTAPI_AUDIO_CMD_PAUSE  = 1,
+    HOSTAPI_AUDIO_CMD_RESUME = 2,
+    HOSTAPI_AUDIO_CMD_STOP   = 3,
+};
+
+/* hostapi_audio_get_state の状態 (Phase 6B) */
+enum {
+    HOSTAPI_AUDIO_STOPPED  = 0,
+    HOSTAPI_AUDIO_PLAYING  = 1,
+    HOSTAPI_AUDIO_PAUSED   = 2,
+    HOSTAPI_AUDIO_FINISHED = 3, /* 自然終了。次の play か STOP まで保持 */
+    HOSTAPI_AUDIO_ERROR    = 4, /* play 失敗。次の play まで保持 */
+};
+
+#define HOSTAPI_NATIVE_SYMBOLS(X)         \
+    X(hostapi_draw_text, "(ii*~)")        \
+    X(hostapi_fill_rect, "(iiiii)")       \
+    X(hostapi_play_click, "()")           \
+    X(hostapi_now_ms, "()i")              \
+    X(hostapi_poll_event, "(*~)i")        \
+    X(hostapi_audio_play, "(*~)i")        \
+    X(hostapi_audio_ctrl, "(i)i")         \
+    X(hostapi_audio_set_volume, "(i)")    \
+    X(hostapi_audio_get_state, "()i")
 
 /* NativeSymbol 配列の初期化子を生成するヘルパ */
 #define HOSTAPI_SYMBOL_ENTRY(name, sig) { #name, (void*)native_##name, sig, NULL },

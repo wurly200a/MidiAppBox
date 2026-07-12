@@ -102,6 +102,9 @@ extern "C" {
     void Music_pause(void);
     void Music_stop(void);
     bool Music_is_playing(void);
+    bool Music_is_paused(void);
+    bool Music_finished(void);              // 自然終了フラグ(play_file で自動クリア)
+    bool Music_play_path(const char* path); // フルパス指定の再生(wasm ホスト API 用)
     void Volume_adjustment(uint8_t Vol);
     extern uint8_t Audio_Volume;      // 0..100
     extern bool    Music_Next_Flag;   // Set true when file finished

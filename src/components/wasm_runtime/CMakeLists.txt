@@ -7,6 +7,8 @@ idf_component_register(
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../wasm-apps/bars/bars.wasm"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../wasm-apps/bench/bench.wasm"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../wasm-apps/touch_demo/touch_demo.wasm"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../wasm-apps/mp3player/mp3player.wasm"
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets/test.mp3"
     PRIV_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../../../shared"
     PRIV_REQUIRES esp_timer audio storage
 )

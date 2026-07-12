@@ -14,6 +14,7 @@
 #include "audio.hpp"
 #include "freertos/FreeRTOS.h"
 
+#include <atomic>
 #include <cstring>
 
 static const char* TAG = "WASM/API";
@@ -192,6 +193,96 @@ uint32_t native_hostapi_now_ms(wasm_exec_env_t exec_env)
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
+// ---- オーディオ API (Phase 6B) ----
+// audio::Mp3Player の薄いラッパ。状態はホスト側で宣言的に管理し、
+// 自然終了(finished フラグ)だけ get_state/ctrl 時に取り込む。
+constexpr const char* kMusicRoot = "/sdcard/music";
+
+std::atomic<int> s_audio_state{HOSTAPI_AUDIO_STOPPED};
+
+// PLAYING 中に自然終了していたら FINISHED へ(呼び出しスレッドは wasm のみ)
+void audio_refresh_finished()
+{
+    if (s_audio_state.load() == HOSTAPI_AUDIO_PLAYING && audio::Music_finished()) {
+        s_audio_state.store(HOSTAPI_AUDIO_FINISHED);
+    }
+}
+
+// ミュージックルート相対パスの検証(サンドボックス境界)
+bool audio_path_ok(const char* path, uint32_t len)
+{
+    if (len == 0 || len > 64) return false;
+    if (path[0] == '/') return false;
+    for (uint32_t i = 0; i + 1 < len; i++) {
+        if (path[i] == '.' && path[i + 1] == '.') return false;
+    }
+    return true;
+}
+
+int32_t native_hostapi_audio_play(wasm_exec_env_t exec_env, const char* path, uint32_t len)
+{
+    (void)exec_env;
+    char rel[65];
+    if (!audio_path_ok(path, len)) {
+        ESP_LOGW(TAG, "audio_play: rejected path");
+        s_audio_state.store(HOSTAPI_AUDIO_ERROR);
+        return -1;
+    }
+    memcpy(rel, path, len);
+    rel[len] = '\0';
+
+    char full[96];
+    snprintf(full, sizeof(full), "%s/%s", kMusicRoot, rel);
+    if (!audio::Music_play_path(full)) {
+        ESP_LOGW(TAG, "audio_play: failed: %s", full);
+        s_audio_state.store(HOSTAPI_AUDIO_ERROR);
+        return -1;
+    }
+    ESP_LOGI(TAG, "audio_play: %s", full);
+    s_audio_state.store(HOSTAPI_AUDIO_PLAYING);
+    return 0;
+}
+
+int32_t native_hostapi_audio_ctrl(wasm_exec_env_t exec_env, int32_t cmd)
+{
+    (void)exec_env;
+    audio_refresh_finished();
+    const int st = s_audio_state.load();
+    switch (cmd) {
+    case HOSTAPI_AUDIO_CMD_PAUSE:
+        if (st != HOSTAPI_AUDIO_PLAYING) return -1;
+        audio::Music_pause();
+        s_audio_state.store(HOSTAPI_AUDIO_PAUSED);
+        return 0;
+    case HOSTAPI_AUDIO_CMD_RESUME:
+        if (st != HOSTAPI_AUDIO_PAUSED) return -1;
+        audio::Music_resume();
+        s_audio_state.store(HOSTAPI_AUDIO_PLAYING);
+        return 0;
+    case HOSTAPI_AUDIO_CMD_STOP:
+        audio::Music_stop();
+        s_audio_state.store(HOSTAPI_AUDIO_STOPPED);
+        return 0;
+    default:
+        return -1;
+    }
+}
+
+void native_hostapi_audio_set_volume(wasm_exec_env_t exec_env, int32_t v)
+{
+    (void)exec_env;
+    if (v < 0) v = 0;
+    if (v > 100) v = 100;
+    audio::Volume_adjustment((uint8_t)v);
+}
+
+int32_t native_hostapi_audio_get_state(wasm_exec_env_t exec_env)
+{
+    (void)exec_env;
+    audio_refresh_finished();
+    return s_audio_state.load();
+}
+
 // buf は WAMR 境界検証済み(シグネチャ "*~")。書いた件数を返す。
 int32_t native_hostapi_poll_event(wasm_exec_env_t exec_env, char* buf, uint32_t len)
 {
@@ -250,6 +341,15 @@ void hostapi_app_screen_destroy()
     }
     lvgl_port_unlock();
     event_queue_reset();
+}
+
+void hostapi_audio_reset()
+{
+    // ライフサイクル契約: アプリ破棄時にオーディオを必ず停止する。
+    // アプリ起動直前にも呼び、STOPPED 状態から開始させる。
+    // 状態変数に頼らず無条件で止める(アイドル時の stop は無害)。
+    audio::Music_stop();
+    s_audio_state.store(HOSTAPI_AUDIO_STOPPED);
 }
 
 bool hostapi_register_natives()

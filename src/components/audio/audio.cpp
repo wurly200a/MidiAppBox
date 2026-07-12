@@ -324,5 +324,11 @@ extern "C" bool Music_is_playing(void) {
 #endif
 }
 extern "C" void Volume_adjustment(uint8_t Vol) { if (g_player) g_player->set_volume(Vol); Audio_Volume = Vol; }
+extern "C" bool Music_is_paused(void) { return g_player && g_player->is_paused(); }
+extern "C" bool Music_finished(void)  { return g_player && g_player->finished_flag(); }
+extern "C" bool Music_play_path(const char* path) {
+    if (!g_player || !path) return false;
+    return g_player->play_file(path);
+}
 
 } // namespace audio

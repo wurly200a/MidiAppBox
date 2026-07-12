@@ -14,4 +14,8 @@ void hostapi_app_screen_create();
 // 呼ぶこと(アクティブなスクリーンは削除できないため)。
 void hostapi_app_screen_destroy();
 
+// オーディオを停止し状態を STOPPED に戻す(Phase 6B ライフサイクル契約)。
+// アプリ起動直前と破棄時に wasm_runtime が呼ぶ。
+void hostapi_audio_reset();
+
 } // namespace wasmrt

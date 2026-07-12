@@ -20,6 +20,10 @@ void host_sdl_clear_slots(void);
 void host_sdl_push_touch(bool down, int x, int y);
 void host_sdl_clear_events(void);
 
+/* オーディオ停止+状態リセット (Phase 6B ライフサイクル契約)。
+ * アプリ起動直前と破棄時に呼ぶ */
+void host_sdl_audio_reset(void);
+
 /* 直描画ヘルパ(ランチャーメニュー用)。begin_frame → rect/text → present */
 void host_sdl_begin_frame(uint32_t rgb888);
 void host_sdl_rect(int x, int y, int w, int h, uint32_t rgb888);
@@ -40,3 +44,7 @@ void native_hostapi_fill_rect(wasm_exec_env_t exec_env, int32_t x, int32_t y,
 void native_hostapi_play_click(wasm_exec_env_t exec_env);
 uint32_t native_hostapi_now_ms(wasm_exec_env_t exec_env);
 int32_t native_hostapi_poll_event(wasm_exec_env_t exec_env, char* buf, uint32_t len);
+int32_t native_hostapi_audio_play(wasm_exec_env_t exec_env, const char* path, uint32_t len);
+int32_t native_hostapi_audio_ctrl(wasm_exec_env_t exec_env, int32_t cmd);
+void native_hostapi_audio_set_volume(wasm_exec_env_t exec_env, int32_t v);
+int32_t native_hostapi_audio_get_state(wasm_exec_env_t exec_env);

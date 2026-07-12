@@ -20,6 +20,10 @@
 #include <SDL_ttf.h>
 #endif
 
+#ifdef HAVE_SDL_MIXER
+#include <SDL_mixer.h>
+#endif
+
 #include "font8x8_basic.h"
 #include "hostapi_defs.h"
 
@@ -84,6 +88,150 @@ static void try_open_font(void)
 
 static TextSlot s_texts[MAX_TEXT_SLOTS];
 static RectSlot s_rects[MAX_RECT_SLOTS];
+
+/* ---- オーディオ (Phase 6B) ----
+ * MP3 再生は SDL_mixer(クリック音の SDL_QueueAudio 経路とは独立のデバイス。
+ * OS 側ミキサで混ざる)。状態は実機と同じ「ホスト宣言 + 自然終了の取り込み」。 */
+#define MUSIC_ROOT "./sdcard/music"
+
+static int s_audio_state = 0; /* HOSTAPI_AUDIO_* */
+#ifdef HAVE_SDL_MIXER
+static Mix_Music* s_music;
+static volatile int s_music_finished;
+static bool s_mixer_ready;
+
+/* SDL_mixer の音楽スレッドから呼ばれる。フラグを立てるだけ */
+static void music_finished_hook(void)
+{
+    s_music_finished = 1;
+}
+#endif
+
+static void audio_refresh_finished(void)
+{
+#ifdef HAVE_SDL_MIXER
+    if (s_audio_state == HOSTAPI_AUDIO_PLAYING && s_music_finished) {
+        s_audio_state = HOSTAPI_AUDIO_FINISHED;
+    }
+#endif
+}
+
+void host_sdl_audio_reset(void)
+{
+#ifdef HAVE_SDL_MIXER
+    if (s_mixer_ready) {
+        Mix_HaltMusic();
+        if (s_music) {
+            Mix_FreeMusic(s_music);
+            s_music = NULL;
+        }
+    }
+#endif
+    s_audio_state = HOSTAPI_AUDIO_STOPPED;
+}
+
+/* ミュージックルート相対パスの検証(実機側 hostapi.cpp と同じ規則) */
+static bool audio_path_ok(const char* path, uint32_t len)
+{
+    if (len == 0 || len > 64) return false;
+    if (path[0] == '/') return false;
+    for (uint32_t i = 0; i + 1 < len; i++) {
+        if (path[i] == '.' && path[i + 1] == '.') return false;
+    }
+    return true;
+}
+
+int32_t native_hostapi_audio_play(wasm_exec_env_t exec_env, const char* path, uint32_t len)
+{
+    (void)exec_env;
+    if (!audio_path_ok(path, len)) {
+        fprintf(stderr, "audio_play: rejected path\n");
+        s_audio_state = HOSTAPI_AUDIO_ERROR;
+        return -1;
+    }
+#ifdef HAVE_SDL_MIXER
+    if (!s_mixer_ready) {
+        s_audio_state = HOSTAPI_AUDIO_ERROR;
+        return -1;
+    }
+    char full[256];
+    snprintf(full, sizeof(full), "%s/%.*s", MUSIC_ROOT, (int)len, path);
+
+    Mix_HaltMusic();
+    if (s_music) {
+        Mix_FreeMusic(s_music);
+        s_music = NULL;
+    }
+    s_music = Mix_LoadMUS(full);
+    if (!s_music) {
+        fprintf(stderr, "audio_play: %s: %s\n", full, Mix_GetError());
+        s_audio_state = HOSTAPI_AUDIO_ERROR;
+        return -1;
+    }
+    s_music_finished = 0;
+    if (Mix_PlayMusic(s_music, 1) != 0) {
+        fprintf(stderr, "audio_play: %s\n", Mix_GetError());
+        Mix_FreeMusic(s_music);
+        s_music = NULL;
+        s_audio_state = HOSTAPI_AUDIO_ERROR;
+        return -1;
+    }
+    printf("audio_play: %s\n", full);
+    s_audio_state = HOSTAPI_AUDIO_PLAYING;
+    return 0;
+#else
+    fprintf(stderr, "audio_play: built without SDL_mixer\n");
+    s_audio_state = HOSTAPI_AUDIO_ERROR;
+    return -1;
+#endif
+}
+
+int32_t native_hostapi_audio_ctrl(wasm_exec_env_t exec_env, int32_t cmd)
+{
+    (void)exec_env;
+    audio_refresh_finished();
+    switch (cmd) {
+    case HOSTAPI_AUDIO_CMD_PAUSE:
+        if (s_audio_state != HOSTAPI_AUDIO_PLAYING) return -1;
+#ifdef HAVE_SDL_MIXER
+        Mix_PauseMusic();
+#endif
+        s_audio_state = HOSTAPI_AUDIO_PAUSED;
+        return 0;
+    case HOSTAPI_AUDIO_CMD_RESUME:
+        if (s_audio_state != HOSTAPI_AUDIO_PAUSED) return -1;
+#ifdef HAVE_SDL_MIXER
+        Mix_ResumeMusic();
+#endif
+        s_audio_state = HOSTAPI_AUDIO_PLAYING;
+        return 0;
+    case HOSTAPI_AUDIO_CMD_STOP:
+#ifdef HAVE_SDL_MIXER
+        if (s_mixer_ready) Mix_HaltMusic();
+#endif
+        s_audio_state = HOSTAPI_AUDIO_STOPPED;
+        return 0;
+    default:
+        return -1;
+    }
+}
+
+void native_hostapi_audio_set_volume(wasm_exec_env_t exec_env, int32_t v)
+{
+    (void)exec_env;
+    if (v < 0) v = 0;
+    if (v > 100) v = 100;
+#ifdef HAVE_SDL_MIXER
+    if (s_mixer_ready) Mix_VolumeMusic(v * MIX_MAX_VOLUME / 100);
+#endif
+}
+
+int32_t native_hostapi_audio_get_state(wasm_exec_env_t exec_env)
+{
+    (void)exec_env;
+    audio_refresh_finished();
+    return s_audio_state;
+}
 
 /* ---- 入力イベントキュー (Phase 6A) ----
  * 実機と同じ規約: 深さ 16、満杯は最古から捨てる、DOWN 未配送の UP は捨てる。
@@ -165,6 +313,20 @@ bool host_sdl_init(void)
         SDL_PauseAudioDevice(s_audio, 0);
     }
 
+#ifdef HAVE_SDL_MIXER
+    if ((Mix_Init(MIX_INIT_MP3) & MIX_INIT_MP3) == 0) {
+        fprintf(stderr, "Mix_Init(MP3) failed: %s (audio_play disabled)\n",
+                Mix_GetError());
+    } else if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 1024) != 0) {
+        fprintf(stderr, "Mix_OpenAudio failed: %s (audio_play disabled)\n",
+                Mix_GetError());
+    } else {
+        s_mixer_ready = true;
+        Mix_HookMusicFinished(music_finished_hook);
+        Mix_VolumeMusic(98 * MIX_MAX_VOLUME / 100); /* 実機の既定音量 98 に合わせる */
+    }
+#endif
+
     s_start_ms = SDL_GetTicks();
     return true;
 }
@@ -174,6 +336,11 @@ void host_sdl_shutdown(void)
 #ifdef HAVE_SDL_TTF
     if (s_font) TTF_CloseFont(s_font);
     if (TTF_WasInit()) TTF_Quit();
+#endif
+#ifdef HAVE_SDL_MIXER
+    host_sdl_audio_reset();
+    if (s_mixer_ready) Mix_CloseAudio();
+    Mix_Quit();
 #endif
     if (s_audio) SDL_CloseAudioDevice(s_audio);
     if (s_renderer) SDL_DestroyRenderer(s_renderer);

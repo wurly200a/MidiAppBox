@@ -30,3 +30,4 @@ cp target/wasm32-unknown-unknown/release/<app>.wasm ./<app>.wasm
 | `bars/` | Phase 5B デモ。イコライザ風 8 本バー(座標固定・サイズ/色可変) |
 | `bench/` | Phase 4 計測用。`bench_empty`/`bench_hostcall`(ランチャーからは起動不可) |
 | `touch_demo/` | Phase 6A 検証。`hostapi_poll_event` のタッチイベントを座標・DOWN/UP カウントで可視化、ボタンタップでクリック音 |
+| `mp3player/` | Phase 6B〜。`hostapi_audio_*` で MP3 を制御(PLAY/PAUSE/STOP/VOL±、FINISHED 検知)。6C でファイル列挙+プレイリストに拡張予定 |

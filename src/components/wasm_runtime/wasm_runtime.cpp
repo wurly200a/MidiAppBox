@@ -310,6 +310,8 @@ void* app_thread(void*)
     const char* error = nullptr;
     char error_buf[128];
 
+    hostapi_audio_reset(); // アプリは必ず STOPPED 状態から始まる
+
     // interpreter はバッファを module 生存中参照する(fast-interp は in-place
     // 書き換えもする)ので、unload まで保持する
     uint32_t wasm_size = 0;
@@ -407,6 +409,9 @@ void* app_thread(void*)
             }
         }
     } while (false);
+
+    // ライフサイクル契約: アプリ破棄時は再生中のオーディオを必ず停止する
+    hostapi_audio_reset();
 
     // 破棄は必ずこの順序: exec_env → instance → module → wasm バッファ
     if (exec_env) wasm_runtime_destroy_exec_env(exec_env);

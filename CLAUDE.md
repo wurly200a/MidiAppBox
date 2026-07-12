@@ -431,6 +431,55 @@ herdr の撮影用 pane で起動し、空文字送信(=Enter)で停止する。
 - 記事素材: `~/ビデオ/demo_172530.mp4`(フルテイク 4:43)、
   `~/ビデオ/zenn-phase6a/`(トリム版 phase6a_touch_verification.mp4 と静止画 6 枚)。
 
+## 6B 実施記録 (2026-07-12) — 完了
+
+hostapi_audio_play/ctrl/set_volume/get_state の 4 関数を追加(設計はユーザー承認済み)。
+両ホストで同一の mp3player.wasm(1983B、6C でプレイリストに育てる土台)により
+再生/一時停止/再開/停止/音量/自然終了(FINISHED)/再生中終了の全項目を検証。
+
+**メモリの壁と対策(6B 最大のリスクが実際に発現)**:
+
+- フル Audio_Init(esp-audio-player タスク)は **47,172 bytes** 消費。
+  FATFS(sector 4096 × max_files 8 ≒ 38KB)と重なると largest block が
+  15,360 まで細り、**mp3player.wasm の instantiate が
+  「allocate linear memory failed」で失敗**した(linear memory は
+  WAMR の shrunk memory で ~20KB 連続を system heap から取る)。
+- 対策(ユーザー承認: A 案): **CONFIG_FATFS_SECTOR_512 + max_files 8→4**。
+  MP3 128kbps=16KB/s に対し sector 512 で十分。適用後はアプリ起動時
+  free 57,688 / largest 31,744 で安定動作。
+- PSRAM 有効化(案 C)は「次のメモリの壁」用のロードマップ項目として温存。
+
+実装メモ:
+
+- 状態機械はホスト側で宣言的に管理(`s_audio_state`)し、自然終了だけ
+  `Music_finished()` を get_state/ctrl 時に取り込む。FINISHED/ERROR は
+  次の play か STOP まで保持。状態不整合のコマンドは -1(トラップしない)。
+- パスはミュージックルート相対(実機 /sdcard/music、Linux ./sdcard/music)。
+  先頭 '/' と ".." は拒否(6C の fs_list と同じサンドボックス境界)。
+- ライフサイクル契約: `hostapi_audio_reset()`(無条件 Music_stop)を
+  アプリ起動直前と破棄時に呼ぶ。Linux は `host_sdl_audio_reset()`。
+- 検証用 MP3(アルペジオ 12 秒 96,801B, 22.05kHz mono 64kbps)を
+  **ファーム埋め込み→ /sdcard/music/test.mp3 へシード**(SD 抜き差し不要)。
+  seed_file は 100KB 級に備えチャンク比較へ変更。
+- クリック音(直接 I2S 書き込み)と esp-audio-player は排他前提のまま:
+  mp3player はクリック音を使わない。同時使用は将来の音源 API で整理。
+- サイクルテストは mp3player.wasm +「再生中に停止」を毎サイクル実施する形に変更。
+
+実測(実機, -Og, 160MHz):
+
+| 項目 | 値 |
+|---|---|
+| Audio_Init(フル)のヒープ消費 | 47,172 bytes |
+| FATFS sector 512 + max_files 4 の効果 | アプリ起動時 free 40,084 → 57,688 |
+| mp3player 実行中 free heap | ~29,400(instantiate 後) |
+| 起動→再生→停止 10 サイクル | 開始 65,892 → 1 回目 65,692(−200B は初回のみ)→ **2〜10 回目 65,692 / largest 31,744 で完全一定** |
+| 停止後の playing フラグ | 全サイクル 0(音停止契約 OK) |
+
+検証エビデンス: `~/ビデオ/demo_185836.mp4`(55 分、操作は最後 6 分)、
+`~/ビデオ/zenn-phase6b/`(トリム版+静止画 8 枚)。起動失敗(メモリの壁)の
+一部始終は `~/ビデオ/demo_183116.mp4`。
+Linux は SDL_mixer で同一検証+mixer 無しビルドのエラーパス確認済み。
+
 # 依存の記録
 
 | 依存 | 追加フェーズ | 理由 |
@@ -438,6 +487,7 @@ herdr の撮影用 pane で起動し、空文字送信(=Enter)で停止する。
 | `espressif/wasm-micro-runtime` (registry, 2.4.0 系固定) | Phase 1 | WASM ランタイム本体。registry 経由が既存ビルドフロー(managed_components + Docker + CI)と整合し追加コスト最小 |
 | (Linux) WAMR vmlib, SDL2 | Phase 3 | Linux ホスト用。実機と同一ランタイムで API 登録コードを共有するため |
 | (Linux) SDL2_ttf(任意) | Phase 5 後 | 実機(LVGL の AA フォント)に見た目を合わせるため。無ければ font8x8 にフォールバックするので必須依存ではない |
+| (Linux) SDL2_mixer(任意) | Phase 6B | MP3 再生。対案 mpg123 直叩きはデコード後の PCM 出力経路(デバイス管理・ミキシング)を自作する必要があるのに対し、SDL_mixer は pause/resume/volume/終了フック(Mix_HookMusicFinished)が hostapi_audio_* の状態機械に 1:1 で対応し、既存 SDL2 と同居できる。無ければ audio_play が常に ERROR を返すビルドになる(必須依存ではない) |
 
 # ビルドメモ
 

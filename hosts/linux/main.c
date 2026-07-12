@@ -194,6 +194,7 @@ static bool app_load(const char* path, App* a)
 
         host_sdl_clear_slots(); /* 実機のアプリスクリーン再生成に相当 */
         host_sdl_clear_events();
+        host_sdl_audio_reset(); /* アプリは STOPPED 状態から始まる */
         uint32_t argv[1] = {0};
         if (!wasm_runtime_call_wasm(a->exec_env, fn_init, 0, argv)) {
             snprintf(s_status, sizeof(s_status), "app_init: %s",
@@ -229,6 +230,7 @@ static void app_unload(App* a, bool clean_stop)
     memset(a, 0, sizeof(*a));
     host_sdl_clear_slots();
     host_sdl_clear_events();
+    host_sdl_audio_reset(); /* 契約: アプリ破棄時にオーディオを停止 */
     printf("app stopped\n");
 }
 
