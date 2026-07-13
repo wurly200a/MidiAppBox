@@ -117,7 +117,17 @@ bool Mp3Player::play_click() noexcept {
         }
         generated = true;
     }
-    return i2s_write(buf, sizeof(buf), 100);
+
+    // マスター音量 (Phase 7A): キャッシュには焼き込まず出力直前にスケール。
+    // 音量変更は次の発音から有効(契約)。
+    static int16_t scratch[kFrames * 2];
+    const int vol = volume_.load();
+    for (int i = 0; i < kFrames * 2; ++i) {
+        scratch[i] = (int16_t)((int32_t)buf[i] * vol / 100);
+    }
+    // アイドル時は DMA 深さ(既定 6x240=1440 フレーム ≒32.6ms)にクリック
+    // (1323 フレーム)が丸ごと収まるため、この write は実質ノンブロッキング
+    return i2s_write(scratch, sizeof(scratch), 100);
 }
 
 bool Mp3Player::reconfig_rate(uint32_t rate_hz, uint32_t bits_cfg, i2s_slot_mode_t ch) noexcept {

@@ -50,3 +50,4 @@ void native_hostapi_audio_set_volume(wasm_exec_env_t exec_env, int32_t v);
 int32_t native_hostapi_audio_get_state(wasm_exec_env_t exec_env);
 int32_t native_hostapi_fs_list(wasm_exec_env_t exec_env, int32_t idx,
                                char* buf, uint32_t buf_len);
+int32_t native_hostapi_click_schedule(wasm_exec_env_t exec_env, int32_t time_ms);

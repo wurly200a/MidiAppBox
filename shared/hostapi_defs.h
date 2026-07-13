@@ -61,7 +61,9 @@
  *     HOSTAPI_AUDIO_CMD_*。現在の状態で無効なコマンド(停止中の PAUSE 等)
  *     は何もせず -1。STOP は任意の状態から STOPPED へ。
  *   hostapi_audio_set_volume(v)
- *     音量 0..100(範囲外はクランプ)。曲をまたいで持続する。
+ *     マスター音量 0..100(範囲外はクランプ)。MP3 とクリックの両方に適用
+ *     (v2 で「MP3 の音量」から再定義)。曲をまたいで持続する。
+ *     発音中のクリックには効かず、次の発音から有効。
  *   hostapi_audio_get_state() -> HOSTAPI_AUDIO_*
  *     FINISHED(自然終了)は読み取りでは消えず、次の play か STOP まで保持
  *     (100ms tick のポーリングで取りこぼさないため)。ERROR も同様。
@@ -77,9 +79,23 @@
  *
  * ============================== misc ==============================
  *
- *   hostapi_play_click()   クリック音(短い減衰サイン)を再生。
+ *   hostapi_play_click()   クリック音(短い減衰サイン)を即時再生。
  *                          MP3 再生との同時使用は将来の音源 API で整理予定。
  *   hostapi_now_ms() -> u32  起動からの経過ミリ秒(イベントの time_ms と同一時基)。
+ *
+ *   hostapi_click_schedule(time_ms) -> 0/-1  (Phase 7A, v2)
+ *     time_ms(hostapi_now_ms() と同一時基)にクリック音を発音するよう予約する。
+ *     tick 格子(100ms)より細かいタイミング精度が要る発音のための API
+ *     (タイミングクリティカルはネイティブ側、の原則によりスケジューリングを
+ *     ホストに移す)。
+ *     - 予約はホスト側に常に 1 件のみ。呼ぶたびに置き換える。
+ *     - time_ms == 0 は予約キャンセル。
+ *     - ホストは最後に発音した予約時刻 last_fired を保持し、
+ *       time_ms <= last_fired の予約は無視して 0 を返す(冪等な再予約を許す)。
+ *       アプリは毎 tick「次の拍」を再予約するだけでよく、二重発音しない。
+ *     - now を過ぎた時刻(ただし last_fired より後)の予約は可及的速やかに発音。
+ *     - アプリ破棄時、ホストは予約と last_fired をリセットする。
+ *     - v2 では MP3 再生中の予約発音の精度は保証しない(クリックと MP3 は排他前提)。
  */
 #pragma once
 
@@ -135,7 +151,8 @@ enum {
     X(hostapi_fs_list, "(i*~)i")          \
     /* misc */                            \
     X(hostapi_play_click, "()")           \
-    X(hostapi_now_ms, "()i")
+    X(hostapi_now_ms, "()i")              \
+    X(hostapi_click_schedule, "(i)i")
 
 /* NativeSymbol 配列の初期化子を生成するヘルパ */
 #define HOSTAPI_SYMBOL_ENTRY(name, sig) { #name, (void*)native_##name, sig, NULL },
