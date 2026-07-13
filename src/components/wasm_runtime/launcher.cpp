@@ -32,6 +32,8 @@ extern const uint8_t mp3player_wasm_start[] asm("_binary_mp3player_wasm_start");
 extern const uint8_t mp3player_wasm_end[]   asm("_binary_mp3player_wasm_end");
 extern const uint8_t clicktest_wasm_start[] asm("_binary_clicktest_wasm_start");
 extern const uint8_t clicktest_wasm_end[]   asm("_binary_clicktest_wasm_end");
+extern const uint8_t metronome_wasm_start[] asm("_binary_metronome_wasm_start");
+extern const uint8_t metronome_wasm_end[]   asm("_binary_metronome_wasm_end");
 // 検証用 MP3(hostapi_audio_* のミュージックルートへシード)
 extern const uint8_t test_mp3_start[] asm("_binary_test_mp3_start");
 extern const uint8_t test_mp3_end[]   asm("_binary_test_mp3_end");
@@ -217,6 +219,8 @@ bool launcher_prepare_sd(char* status, size_t status_len)
     seed_file(path, mp3player_wasm_start, mp3player_wasm_end);
     snprintf(path, sizeof(path), "%s/clicktest.wasm", kAppsDir);
     seed_file(path, clicktest_wasm_start, clicktest_wasm_end);
+    snprintf(path, sizeof(path), "%s/metronome.wasm", kAppsDir);
+    seed_file(path, metronome_wasm_start, metronome_wasm_end);
 
     // hostapi_audio_* のミュージックルートと検証用 MP3 (Phase 6B)
     if (stat("/sdcard/music", &st) != 0 && mkdir("/sdcard/music", 0775) != 0) {
