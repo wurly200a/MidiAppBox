@@ -19,7 +19,12 @@ extern "C" {
     fn hostapi_poll_event(buf: *mut u8, buf_len: u32) -> i32;
     fn hostapi_now_ms() -> u32;
     fn hostapi_click_schedule(time_ms: i32) -> i32;
+    fn hostapi_tone_define(slot: i32, wave: i32, freq_hz: i32, dur_ms: i32, level: i32) -> i32;
+    fn hostapi_tone_schedule(slot: i32, time_ms: i32) -> i32;
 }
+
+// アクセント音のスロット(1 拍目用)。slot 0 は既定クリック(通常拍)のまま
+const ACCENT_SLOT: i32 = 1;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -165,13 +170,21 @@ fn draw_buttons() {
     draw_run_button();
 }
 
+/// 拍番号 n に応じたトーンで予約する(小節頭 = アクセント)
+fn schedule_beat(n: u64) {
+    unsafe {
+        let slot = if n % (SIGS[SIG_IDX] as u64) == 0 { ACCENT_SLOT } else { 0 };
+        hostapi_tone_schedule(slot, beat_time(n).max(1) as i32);
+    }
+}
+
 /// 再アンカー(START、BPM/拍子変更時)。次の拍が period 後に来るよう now を拍 0 に
 fn rearm(now: u32) {
     unsafe {
         ANCHOR = now;
         LAST_BEAT = u64::MAX;
         if RUNNING {
-            hostapi_click_schedule(beat_time(0).max(1) as i32); // 拍 0 = 今すぐ
+            schedule_beat(0); // 拍 0(小節頭)= 今すぐ
         }
     }
 }
@@ -235,6 +248,9 @@ pub extern "C" fn app_init() -> i32 {
         RUNNING = false;
         LAST_BEAT = u64::MAX;
         LAMP_LIT = usize::MAX;
+
+        // 1 拍目のアクセント音(高いピッチ)。通常拍は slot 0 の既定クリック
+        hostapi_tone_define(ACCENT_SLOT, 0 /*SINE*/, 1568, 30, 100);
     }
     draw_status();
     draw_lamps(usize::MAX);
@@ -262,8 +278,9 @@ pub extern "C" fn app_tick() {
         let now = hostapi_now_ms();
         let beat = beat_of(now);
 
-        // 次の拍を毎 tick 再予約(last_fired ガードで二重発音しない)
-        hostapi_click_schedule(beat_time(beat + 1) as i32);
+        // 次の拍を毎 tick 再予約(last_fired ガードで二重発音しない)。
+        // 小節頭ならアクセント音のスロットで予約する
+        schedule_beat(beat + 1);
 
         // 拍ランプの更新(視覚は tick 格子で十分)
         if beat != LAST_BEAT {

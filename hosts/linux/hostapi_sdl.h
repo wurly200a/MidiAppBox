@@ -51,3 +51,9 @@ int32_t native_hostapi_audio_get_state(wasm_exec_env_t exec_env);
 int32_t native_hostapi_fs_list(wasm_exec_env_t exec_env, int32_t idx,
                                char* buf, uint32_t buf_len);
 int32_t native_hostapi_click_schedule(wasm_exec_env_t exec_env, int32_t time_ms);
+int32_t native_hostapi_tone_define(wasm_exec_env_t exec_env, int32_t slot,
+                                   int32_t wave, int32_t freq_hz, int32_t dur_ms,
+                                   int32_t level);
+int32_t native_hostapi_tone_play(wasm_exec_env_t exec_env, int32_t slot);
+int32_t native_hostapi_tone_schedule(wasm_exec_env_t exec_env, int32_t slot,
+                                     int32_t time_ms);

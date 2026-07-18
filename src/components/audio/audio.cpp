@@ -106,21 +106,28 @@ bool Mp3Player::init_i2s_only(uint32_t sample_rate_hz, uint8_t bits, bool stereo
 // 古いディスクリプタが 1 本再生される(実測: 全拍の ~25% で 26-27ms 後に再発音)。
 // 対策はゼロパディング書き込み(下記)で、それがブロッキングになるため専用タスク化。
 bool Mp3Player::play_click() noexcept {
-    if (!click_sem_) return false;
-    xSemaphoreGive(click_sem_);
-    return true;
+    return play_tone(1000, 30, 100); // v0 既定クリック
+}
+
+bool Mp3Player::play_tone(uint16_t freq_hz, uint16_t dur_ms, uint8_t level) noexcept {
+    if (!tone_queue_) return false;
+    ToneMsg msg{freq_hz, dur_ms, level};
+    // 満杯(発音が密に重なった)ときは捨てる(v2 契約: 重なりはベストエフォート)
+    return xQueueSend(tone_queue_, &msg, 0) == pdTRUE;
 }
 
 // タスクスタック等は静的確保(BSS)。ヒープから取ると最大連続ブロックを
 // 分断して WASM の linear memory 確保(~20KB 連続)を壊すため(6B の教訓)。
 static uint8_t s_click_stack[4096];
 static StaticTask_t s_click_tcb;
-static StaticSemaphore_t s_click_sem_buf;
+static uint8_t s_tone_queue_buf[4 * sizeof(Mp3Player::ToneMsg)];
+static StaticQueue_t s_tone_queue_cb;
 
 void Mp3Player::ensure_click_task() noexcept {
     if (click_task_) return;
-    click_sem_ = xSemaphoreCreateBinaryStatic(&s_click_sem_buf);
-    if (!click_sem_) return;
+    tone_queue_ = xQueueCreateStatic(4, sizeof(ToneMsg), s_tone_queue_buf,
+                                     &s_tone_queue_cb);
+    if (!tone_queue_) return;
     auto fn = [](void* arg) { static_cast<Mp3Player*>(arg)->click_task_loop(); };
     click_task_ = xTaskCreateStatic(fn, "click", sizeof(s_click_stack), this, 18,
                                     s_click_stack, &s_click_tcb);
@@ -130,58 +137,56 @@ void Mp3Player::ensure_click_task() noexcept {
 }
 
 void Mp3Player::click_task_loop() noexcept {
+    ToneMsg msg;
     for (;;) {
-        if (xSemaphoreTake(click_sem_, portMAX_DELAY) == pdTRUE) {
-            click_write_now();
+        if (xQueueReceive(tone_queue_, &msg, portMAX_DELAY) == pdTRUE) {
+            tone_write_now(msg);
         }
     }
 }
 
-void Mp3Player::click_write_now() noexcept {
+// パラメトリック減衰サインをキャッシュレスで合成しながら書く (Phase 7C)。
+// 再帰振動子(回転行列)なのでサンプルごとの libm 呼び出しは無い。
+void Mp3Player::tone_write_now(const ToneMsg& msg) noexcept {
     if (!tx_) return;
 
     // MP3(22.05kHz 等)再生後に I2S レートが変わったままだと半分のピッチで
-    // 鳴るため、クリック前に 44.1kHz へ戻す(同一設定なら reconfig は no-op)
+    // 鳴るため、発音前に 44.1kHz へ戻す(同一設定なら reconfig は no-op)
     if (cur_rate_ != 44100 || cur_bits_ != 16 || !cur_stereo_) {
         if (!ensure_i2s(44100, 16, true)) return;
     }
 
-    // 1kHz 減衰サイン 30ms @44.1kHz 16bit ステレオ。初回に生成してキャッシュ。
     constexpr int kSampleRate = 44100;
-    constexpr int kFrames = kSampleRate * 30 / 1000;
-    static int16_t buf[kFrames * 2];
-    static bool generated = false;
-    if (!generated) {
-        constexpr float kFreq = 1000.0f;
-        constexpr float kAmp = 12000.0f;
-        for (int i = 0; i < kFrames; ++i) {
-            float t = (float)i / kSampleRate;
-            float decay = expf(-t * 120.0f);
-            int16_t s = (int16_t)std::lround(kAmp * decay * sinf(2.0f * (float)M_PI * kFreq * t));
-            buf[i * 2] = s;
-            buf[i * 2 + 1] = s;
-        }
-        generated = true;
-    }
+    const int total = (int)kSampleRate * msg.dur_ms / 1000;
+    const float w = 2.0f * (float)M_PI * (float)msg.freq_hz / kSampleRate;
+    const float cw = cosf(w);
+    const float sw = sinf(w);
+    // エンベロープ: dur_ms 終端で e^-3.5 ≒ -30dB(既定クリック 30ms は従来と同等)
+    const float decay = expf(-3.5f / (float)total);
+    float amp = 12000.0f * msg.level / 100.0f * volume_.load() / 100.0f;
+    float s = 0.0f, c = 1.0f; // sin/cos の回転状態
 
-    // マスター音量: キャッシュには焼き込まず、チャンク単位でスケールして書く
-    // (5.3KB の静的スクラッチを持たないため。音量変更は次の発音から有効)。
-    const int vol = volume_.load();
     int16_t chunk[240 * 2]; // 1 DMA ディスクリプタぶん(タスクスタック上)
-    int off = 0;
-    while (off < kFrames * 2) {
-        int n = kFrames * 2 - off;
-        if (n > (int)(sizeof(chunk) / sizeof(chunk[0]))) n = sizeof(chunk) / sizeof(chunk[0]);
+    int done = 0;
+    while (done < total) {
+        int n = total - done;
+        if (n > 240) n = 240;
         for (int i = 0; i < n; ++i) {
-            chunk[i] = (int16_t)((int32_t)buf[off + i] * vol / 100);
+            const float s2 = s * cw + c * sw;
+            c = c * cw - s * sw;
+            s = s2;
+            amp *= decay;
+            const int16_t v = (int16_t)(amp * s);
+            chunk[i * 2] = v;
+            chunk[i * 2 + 1] = v;
         }
-        i2s_write(chunk, n * sizeof(int16_t), 100);
-        off += n;
+        i2s_write(chunk, (size_t)n * 2 * sizeof(int16_t), 100);
+        done += n;
     }
 
     // DMA リング(既定 6 ディスクリプタ × 240 フレーム)を丸ごとゼロで上書きする。
     // アンダーフロー時に古いディスクリプタがプリフェッチ再生されても無音になる。
-    // 合計 ~63ms ぶんの書き込みでブロックするが、専用タスクなので無害。
+    // 書き込みでブロックするが、専用タスクなので無害。
     static const int16_t zeros[240 * 2] = {};
     for (int i = 0; i < 6; ++i) {
         i2s_write((void*)zeros, sizeof(zeros), 100);
@@ -366,6 +371,10 @@ extern "C" void Audio_Click_Init(void) {
 
 extern "C" void Play_Click(void) {
     if (g_player) g_player->play_click();
+}
+
+extern "C" bool Play_Tone(uint16_t freq_hz, uint16_t dur_ms, uint8_t level) {
+    return g_player && g_player->play_tone(freq_hz, dur_ms, level);
 }
 
 extern "C" void Play_Music(const char* directory, const char* fileName) {

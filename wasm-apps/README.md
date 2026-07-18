@@ -32,4 +32,4 @@ cp target/wasm32-unknown-unknown/release/<app>.wasm ./<app>.wasm
 | `touch_demo/` | Phase 6A 検証。`hostapi_poll_event` のタッチイベントを座標・DOWN/UP カウントで可視化、ボタンタップでクリック音 |
 | `mp3player/` | Phase 6B〜。`hostapi_audio_*` で MP3 を制御(PLAY/PAUSE/STOP/VOL±、FINISHED 検知)。6C でファイル列挙+プレイリスト対応 |
 | `clicktest/` | Phase 7A 検証。`hostapi_click_schedule` で BPM120 を予約発音。タップで SCHED⇔LEGACY(tick 内直呼び)を切替してジッタ比較 |
-| `metronome/` | Phase 7B。メトロノーム本体。可変 BPM(40-240)・拍子(2/3/4/6)・START/STOP・拍ランプ(1 拍目アクセント色)。発音は click_schedule への毎 tick 再予約 |
+| `metronome/` | Phase 7B/7C。メトロノーム本体。可変 BPM(40-240)・拍子(2/3/4/6)・START/STOP・拍ランプ。小節頭は `hostapi_tone_*` で定義したアクセント音(1568Hz)、発音は tone_schedule への毎 tick 再予約 |

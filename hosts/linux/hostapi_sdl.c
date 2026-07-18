@@ -63,18 +63,48 @@ static uint32_t s_start_ms;
  * バッファ内オフセットでサンプル精度の発音を行う。
  * 共有状態は SDL_LockAudioDevice(コールバックは暗黙にロック保持)で保護。 */
 #define CLICK_RATE 44100
-#define CLICK_FRAMES (CLICK_RATE * 30 / 1000)
-static int16_t s_click_wave[CLICK_FRAMES * 2]; /* ステレオ interleaved */
-static bool s_click_wave_ready;
+
+/* トーンパレット (Phase 7C)。アプリセッション状態(audio_reset で初期化) */
+typedef struct {
+    bool defined;
+    uint16_t freq_hz;
+    uint16_t dur_ms;
+    uint8_t level;
+} ToneDef;
+static ToneDef s_tones[HOSTAPI_TONE_SLOTS];
+static const ToneDef kDefaultClick = {true, 1000, 30, 100};
+
+/* 発音中のボイス(キャッシュレス合成: 再帰振動子)。単声(v2 契約) */
+typedef struct {
+    int remaining;      /* 残りフレーム(0=idle) */
+    float s, c;         /* sin/cos の回転状態 */
+    float cw, sw;       /* 回転係数 */
+    float decay, amp;
+} Voice;
+static Voice s_voice;
 
 static uint64_t s_audio_samples;   /* 再生済みフレーム数(音声クロック) */
 static uint32_t s_audio_epoch_ms;  /* サンプル 0 に対応する now_ms */
 static bool s_audio_epoch_set;     /* エポックは最初のコールバックで確定する */
 static uint32_t s_click_pending;   /* 予約時刻(0=なし) */
+static ToneDef s_pending_tone;     /* 予約時のスナップショット */
 static uint32_t s_click_last_fired;
-static bool s_click_asap;          /* v0 play_click: 次のバッファ先頭で即発音 */
-static int s_click_pos = -1;       /* 再生中クリックの読み出し位置(-1=idle) */
+static bool s_click_asap;          /* 即時発音要求: 次のバッファ先頭で発音 */
+static ToneDef s_asap_tone;
 static int s_master_vol = 98;      /* マスター音量(実機の既定と一致) */
+
+/* ボイスをトーン定義から初期化(発音開始)。マスター音量は発音時に焼き込む */
+static void voice_start(const ToneDef* t)
+{
+    const float w = 2.0f * (float)M_PI * (float)t->freq_hz / CLICK_RATE;
+    s_voice.remaining = CLICK_RATE * t->dur_ms / 1000;
+    s_voice.s = 0.0f;
+    s_voice.c = 1.0f;
+    s_voice.cw = cosf(w);
+    s_voice.sw = sinf(w);
+    s_voice.decay = expf(-3.5f / (float)s_voice.remaining); /* 終端で ~-30dB */
+    s_voice.amp = 12000.0f * t->level / 100.0f * s_master_vol / 100.0f;
+}
 
 /* ジッタ統計: 発音開始位置(音声クロック)と壁時計を N 発ごとに集計 */
 #define CLICK_STAT_N 100
@@ -113,21 +143,6 @@ static void click_record_fire(uint64_t sample)
     }
 }
 
-static void click_wave_ensure(void)
-{
-    if (s_click_wave_ready) return;
-    const float kFreq = 1000.0f;
-    const float kAmp = 12000.0f;
-    for (int i = 0; i < CLICK_FRAMES; ++i) {
-        float t = (float)i / CLICK_RATE;
-        float decay = expf(-t * 120.0f);
-        int16_t s = (int16_t)lroundf(kAmp * decay * sinf(2.0f * (float)M_PI * kFreq * t));
-        s_click_wave[i * 2] = s;
-        s_click_wave[i * 2 + 1] = s;
-    }
-    s_click_wave_ready = true;
-}
-
 /* now_ms → 音声クロック上の目標フレーム */
 static uint64_t click_ms_to_sample(uint32_t ms)
 {
@@ -155,10 +170,11 @@ static void audio_callback(void* userdata, Uint8* stream, int len)
 
     /* 発火判定: 目標サンプルがこのバッファに入ったらオフセット付きで開始 */
     int start_off = -1;
+    const ToneDef* start_tone = NULL;
     if (s_click_asap) {
         s_click_asap = false;
         start_off = 0;
-        s_click_pos = -1; /* 進行中でも打ち直す */
+        start_tone = &s_asap_tone;
         click_record_fire(buf_start);
     } else if (s_click_pending != 0 && s_click_pending > s_click_last_fired) {
         uint64_t target = click_ms_to_sample(s_click_pending);
@@ -172,22 +188,26 @@ static void audio_callback(void* userdata, Uint8* stream, int len)
         if (target < buf_start + (uint64_t)frames || wall_due) {
             if (target >= buf_start + (uint64_t)frames) target = buf_start;
             start_off = (int)(target - buf_start);
+            start_tone = &s_pending_tone;
             s_click_last_fired = s_click_pending;
             s_click_pending = 0;
-            s_click_pos = -1;
             click_record_fire(target);
         }
     }
 
     for (int i = 0; i < frames; i++) {
-        if (start_off >= 0 && i == start_off) s_click_pos = 0;
-        if (s_click_pos >= 0 && s_click_pos < CLICK_FRAMES) {
-            out[i * 2]     = (int16_t)(s_click_wave[s_click_pos * 2] * s_master_vol / 100);
-            out[i * 2 + 1] = (int16_t)(s_click_wave[s_click_pos * 2 + 1] * s_master_vol / 100);
-            s_click_pos++;
+        if (start_off >= 0 && i == start_off) voice_start(start_tone);
+        if (s_voice.remaining > 0) {
+            const float s2 = s_voice.s * s_voice.cw + s_voice.c * s_voice.sw;
+            s_voice.c = s_voice.c * s_voice.cw - s_voice.s * s_voice.sw;
+            s_voice.s = s2;
+            s_voice.amp *= s_voice.decay;
+            const int16_t v = (int16_t)(s_voice.amp * s_voice.s);
+            out[i * 2] = v;
+            out[i * 2 + 1] = v;
+            s_voice.remaining--;
         }
     }
-    if (s_click_pos >= CLICK_FRAMES) s_click_pos = -1;
 
     s_audio_samples += (uint64_t)frames;
 }
@@ -267,16 +287,18 @@ void host_sdl_audio_reset(void)
 #endif
     s_audio_state = HOSTAPI_AUDIO_STOPPED;
 
-    /* クリック予約と last_fired もリセット(Phase 7A 契約)。
+    /* クリック予約・last_fired・トーンパレットもリセット(Phase 7A/7C 契約)。
      * マスター音量は既定に戻す(アプリ起動時の初期状態を一定にする) */
     if (s_audio) {
         SDL_LockAudioDevice(s_audio);
         s_click_pending = 0;
         s_click_last_fired = 0;
         s_click_asap = false;
-        s_click_pos = -1;
+        s_voice.remaining = 0;
         s_fire_count = 0;
         s_master_vol = 98;
+        for (int i = 0; i < HOSTAPI_TONE_SLOTS; i++) s_tones[i] = (ToneDef){0};
+        s_tones[0] = kDefaultClick; /* slot 0 = v0 互換の既定クリック */
         SDL_UnlockAudioDevice(s_audio);
     }
 }
@@ -513,7 +535,6 @@ bool host_sdl_init(void)
         fprintf(stderr, "SDL_OpenAudioDevice failed: %s (continuing without sound)\n",
                 SDL_GetError());
     } else {
-        click_wave_ensure();
         SDL_PauseAudioDevice(s_audio, 0);
     }
 
@@ -736,37 +757,109 @@ void native_hostapi_fill_rect(wasm_exec_env_t exec_env, int32_t x, int32_t y,
     slot->used = true;
 }
 
-void native_hostapi_play_click(wasm_exec_env_t exec_env)
+/* slot を解決してコピーを返す(未定義なら false)。ロック外から呼ぶこと */
+static bool tone_lookup(int32_t slot, ToneDef* out)
 {
-    (void)exec_env;
-    if (!s_audio) return;
-    /* 即時発音 = 次のコールバックバッファ先頭で開始(挙動は v0 と同等) */
+    if (slot < 0 || slot >= HOSTAPI_TONE_SLOTS) return false;
+    bool ok;
     SDL_LockAudioDevice(s_audio);
-    s_click_asap = true;
+    ok = s_tones[slot].defined;
+    if (ok) *out = s_tones[slot];
     SDL_UnlockAudioDevice(s_audio);
+    return ok;
 }
 
-int32_t native_hostapi_click_schedule(wasm_exec_env_t exec_env, int32_t time_ms)
+static int32_t tone_play_impl(int32_t slot)
 {
-    (void)exec_env;
+    if (!s_audio) return -1;
+    ToneDef tone;
+    if (!tone_lookup(slot, &tone)) return -1;
+    /* 即時発音 = 次のコールバックバッファ先頭で開始 */
+    SDL_LockAudioDevice(s_audio);
+    s_asap_tone = tone;
+    s_click_asap = true;
+    SDL_UnlockAudioDevice(s_audio);
+    return 0;
+}
+
+static int32_t tone_schedule_impl(int32_t slot, int32_t time_ms)
+{
     if (!s_audio) return -1;
     const uint32_t t = (uint32_t)time_ms;
     const uint32_t now = SDL_GetTicks() - s_start_ms;
+
+    if (t == 0) { /* キャンセル(slot によらず有効) */
+        SDL_LockAudioDevice(s_audio);
+        s_click_pending = 0;
+        SDL_UnlockAudioDevice(s_audio);
+        return 0;
+    }
+
+    ToneDef tone;
+    if (!tone_lookup(slot, &tone)) return -1;
+
     SDL_LockAudioDevice(s_audio);
-    if (t == 0) {
-        s_click_pending = 0; /* キャンセル */
-    } else if (t > s_click_last_fired) {
+    if (t > s_click_last_fired) {
         /* 置き換えガード: 期限到来済みの未発火予約を破棄しない。
          * 先にその予約を「可及的速やか」に発音扱いにしてから置き換える */
         if (s_click_pending != 0 && s_click_pending != t &&
             s_click_pending <= now && s_click_pending > s_click_last_fired) {
             s_click_last_fired = s_click_pending;
+            s_asap_tone = s_pending_tone;
             s_click_asap = true;
         }
         s_click_pending = t; /* 置き換え予約(last_fired 以前は無視) */
+        s_pending_tone = tone; /* 予約時スナップショット */
     }
     SDL_UnlockAudioDevice(s_audio);
     return 0;
+}
+
+void native_hostapi_play_click(wasm_exec_env_t exec_env)
+{
+    (void)exec_env;
+    tone_play_impl(0);
+}
+
+int32_t native_hostapi_click_schedule(wasm_exec_env_t exec_env, int32_t time_ms)
+{
+    (void)exec_env;
+    return tone_schedule_impl(0, time_ms);
+}
+
+int32_t native_hostapi_tone_define(wasm_exec_env_t exec_env, int32_t slot,
+                                   int32_t wave, int32_t freq_hz, int32_t dur_ms,
+                                   int32_t level)
+{
+    (void)exec_env;
+    if (slot < 0 || slot >= HOSTAPI_TONE_SLOTS) return -1;
+    if (wave != HOSTAPI_WAVE_SINE) return -1; /* 未知の波形(トラップしない) */
+    if (!s_audio) return -1;
+
+    if (freq_hz < 100) freq_hz = 100;
+    if (freq_hz > 8000) freq_hz = 8000;
+    if (dur_ms < 5) dur_ms = 5;
+    if (dur_ms > 100) dur_ms = 100;
+    if (level < 0) level = 0;
+    if (level > 100) level = 100;
+
+    SDL_LockAudioDevice(s_audio);
+    s_tones[slot] = (ToneDef){true, (uint16_t)freq_hz, (uint16_t)dur_ms, (uint8_t)level};
+    SDL_UnlockAudioDevice(s_audio);
+    return 0;
+}
+
+int32_t native_hostapi_tone_play(wasm_exec_env_t exec_env, int32_t slot)
+{
+    (void)exec_env;
+    return tone_play_impl(slot);
+}
+
+int32_t native_hostapi_tone_schedule(wasm_exec_env_t exec_env, int32_t slot,
+                                     int32_t time_ms)
+{
+    (void)exec_env;
+    return tone_schedule_impl(slot, time_ms);
 }
 
 uint32_t native_hostapi_now_ms(wasm_exec_env_t exec_env)

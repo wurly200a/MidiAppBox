@@ -42,9 +42,19 @@ public:
     // WASM デモモードのクリック音用)
     bool init_i2s_only(uint32_t sample_rate_hz = 44100, uint8_t bits = 16, bool stereo = true) noexcept;
 
-    // クリック音(1kHz 減衰サイン ~30ms)の発音を専用タスクに依頼する。
-    // 呼び出し側(wasm スレッド / esp_timer コールバック)はブロックしない。
+    // クリック音(1kHz 減衰サイン 30ms = 既定トーン)の発音を依頼する。
     bool play_click() noexcept;
+
+    // パラメトリックな減衰サイン(Phase 7C tone API)の発音を専用タスクに依頼する。
+    // 呼び出し側(wasm スレッド / esp_timer コールバック)はブロックしない。
+    // level 0..100 はトーン固有ゲイン(マスター音量と乗算)。
+    bool play_tone(uint16_t freq_hz, uint16_t dur_ms, uint8_t level) noexcept;
+
+    struct ToneMsg {
+        uint16_t freq_hz;
+        uint16_t dur_ms;
+        uint8_t level;
+    };
 
     // Start playback of a file via audio_player when available (fallback stubs otherwise)
     bool play_file(const std::string& path) noexcept;
@@ -65,7 +75,7 @@ private:
     bool i2s_write(void* data, size_t len, uint32_t timeout_ms, size_t* written = nullptr) noexcept;
     void ensure_click_task() noexcept;
     void click_task_loop() noexcept;
-    void click_write_now() noexcept;
+    void tone_write_now(const ToneMsg& msg) noexcept;
 #if HAVE_ESP_AUDIO_PLAYER
     static esp_err_t write_fn(void* audio_buffer, size_t len, size_t* bytes_written, uint32_t timeout_ms);
     static esp_err_t clk_set_fn(uint32_t rate, uint32_t bits_cfg, i2s_slot_mode_t ch);
@@ -89,8 +99,8 @@ private:
     // audio_player synchronization
     static Mp3Player* s_self; // for static callbacks
     QueueHandle_t event_queue_ = nullptr;
-    // クリック発音タスク(Phase 7B fix: DMA プリフェッチ再生対策)
-    SemaphoreHandle_t click_sem_ = nullptr;
+    // トーン発音タスク(Phase 7B fix: DMA プリフェッチ再生対策 / 7C: パラメトリック化)
+    QueueHandle_t tone_queue_ = nullptr;
     TaskHandle_t click_task_ = nullptr;
 #if HAVE_ESP_AUDIO_PLAYER
     audio_player_callback_event_t expected_event_{};
@@ -104,6 +114,7 @@ extern "C" {
     void Audio_Init(void);
     void Audio_Click_Init(void);   // I2S のみ初期化(クリック音用)
     void Play_Click(void);         // クリック音を再生
+    bool Play_Tone(uint16_t freq_hz, uint16_t dur_ms, uint8_t level); // 減衰サイン (7C)
     void Play_Music(const char* directory, const char* fileName);
     void Music_resume(void);
     void Music_pause(void);

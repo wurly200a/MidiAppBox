@@ -182,14 +182,33 @@ void native_hostapi_fill_rect(wasm_exec_env_t exec_env, int32_t x, int32_t y,
     lvgl_port_unlock();
 }
 
-// ---- クリック予約発音 (Phase 7A) ----
+// ---- トーン予約発音 (Phase 7A/7C) ----
 // 方式(a): esp_timer ワンショット(systimer, µs 分解能、タスクディスパッチ)。
-// コールバックはタスクコンテキストなので i2s_channel_write は合法。
-// アイドル時のクリック書き込みは DMA 深さに収まり実質ノンブロッキング。
+// 発音自体は audio の専用タスクに依頼するため、どのコンテキストからも軽い。
 esp_timer_handle_t s_click_timer = nullptr;
 uint32_t s_click_pending = 0;    // 予約時刻(0=なし)
 uint32_t s_click_last_fired = 0;
 portMUX_TYPE s_click_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// トーンパレット (Phase 7C)。アプリセッション状態(reset で初期化)。
+struct ToneDef {
+    bool defined;
+    uint16_t freq_hz;
+    uint16_t dur_ms;
+    uint8_t level;
+};
+ToneDef s_tones[HOSTAPI_TONE_SLOTS];
+ToneDef s_pending_tone; // 予約時のスナップショット(s_click_mux 下で参照)
+
+constexpr ToneDef kDefaultClick = {true, 1000, 30, 100};
+
+void tone_table_reset()
+{
+    portENTER_CRITICAL(&s_click_mux);
+    for (auto& t : s_tones) t = ToneDef{};
+    s_tones[0] = kDefaultClick; // slot 0 = v0 互換の既定クリック
+    portEXIT_CRITICAL(&s_click_mux);
+}
 
 // ジッタ統計: 発火時刻(µs)を N 発ごとに集計(SCHED/LEGACY 両経路で記録)
 constexpr int kClickStatN = 100;
@@ -222,16 +241,18 @@ void click_timer_cb(void*)
 {
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
     uint32_t t = 0;
+    ToneDef tone{};
     portENTER_CRITICAL(&s_click_mux);
     if (s_click_pending != 0 && s_click_pending <= now + 1) {
         t = s_click_pending;
+        tone = s_pending_tone;
         s_click_pending = 0;
         s_click_last_fired = t;
     }
     portEXIT_CRITICAL(&s_click_mux);
     if (t != 0) {
         click_record_fire();
-        audio::Play_Click();
+        audio::Play_Tone(tone.freq_hz, tone.dur_ms, tone.level);
     }
 }
 
@@ -245,20 +266,33 @@ void click_timer_ensure()
     ESP_ERROR_CHECK(esp_timer_create(&args, &s_click_timer));
 }
 
-void native_hostapi_play_click(wasm_exec_env_t exec_env)
+// slot を解決してコピーを返す(未定義なら false)
+bool tone_lookup(int32_t slot, ToneDef* out)
 {
-    (void)exec_env;
-    click_record_fire(); // 従来方式(tick 内直呼び)も同じ統計に乗せる
-    audio::Play_Click();
+    if (slot < 0 || slot >= HOSTAPI_TONE_SLOTS) return false;
+    portENTER_CRITICAL(&s_click_mux);
+    const ToneDef t = s_tones[slot];
+    portEXIT_CRITICAL(&s_click_mux);
+    if (!t.defined) return false;
+    *out = t;
+    return true;
 }
 
-int32_t native_hostapi_click_schedule(wasm_exec_env_t exec_env, int32_t time_ms)
+int32_t tone_play_impl(int32_t slot)
 {
-    (void)exec_env;
+    ToneDef tone;
+    if (!tone_lookup(slot, &tone)) return -1;
+    click_record_fire(); // 即時発音(従来方式含む)も同じ統計に乗せる
+    audio::Play_Tone(tone.freq_hz, tone.dur_ms, tone.level);
+    return 0;
+}
+
+int32_t tone_schedule_impl(int32_t slot, int32_t time_ms)
+{
     if (!s_click_timer) return -1;
     const uint32_t t = (uint32_t)time_ms;
 
-    if (t == 0) { // キャンセル
+    if (t == 0) { // キャンセル(slot によらず有効)
         portENTER_CRITICAL(&s_click_mux);
         s_click_pending = 0;
         portEXIT_CRITICAL(&s_click_mux);
@@ -266,8 +300,12 @@ int32_t native_hostapi_click_schedule(wasm_exec_env_t exec_env, int32_t time_ms)
         return 0;
     }
 
+    ToneDef tone;
+    if (!tone_lookup(slot, &tone)) return -1;
+
     const uint32_t now_pre = (uint32_t)(esp_timer_get_time() / 1000);
     bool fire_old = false;
+    ToneDef old_tone{};
     portENTER_CRITICAL(&s_click_mux);
     if (t <= s_click_last_fired) { // 冪等な再予約: 無視
         portEXIT_CRITICAL(&s_click_mux);
@@ -278,13 +316,15 @@ int32_t native_hostapi_click_schedule(wasm_exec_env_t exec_env, int32_t time_ms)
     if (s_click_pending != 0 && s_click_pending != t &&
         s_click_pending <= now_pre && s_click_pending > s_click_last_fired) {
         s_click_last_fired = s_click_pending;
+        old_tone = s_pending_tone;
         fire_old = true;
     }
-    s_click_pending = t; // 置き換え
+    s_click_pending = t; // 置き換え(トーンは予約時スナップショット)
+    s_pending_tone = tone;
     portEXIT_CRITICAL(&s_click_mux);
     if (fire_old) {
         click_record_fire();
-        audio::Play_Click();
+        audio::Play_Tone(old_tone.freq_hz, old_tone.dur_ms, old_tone.level);
     }
 
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
@@ -293,6 +333,54 @@ int32_t native_hostapi_click_schedule(wasm_exec_env_t exec_env, int32_t time_ms)
     esp_timer_stop(s_click_timer);
     esp_timer_start_once(s_click_timer, (uint64_t)delta_us);
     return 0;
+}
+
+// ---- natives(v0/7A 互換は slot 0 への別名) ----
+
+void native_hostapi_play_click(wasm_exec_env_t exec_env)
+{
+    (void)exec_env;
+    tone_play_impl(0);
+}
+
+int32_t native_hostapi_click_schedule(wasm_exec_env_t exec_env, int32_t time_ms)
+{
+    (void)exec_env;
+    return tone_schedule_impl(0, time_ms);
+}
+
+int32_t native_hostapi_tone_define(wasm_exec_env_t exec_env, int32_t slot,
+                                   int32_t wave, int32_t freq_hz, int32_t dur_ms,
+                                   int32_t level)
+{
+    (void)exec_env;
+    if (slot < 0 || slot >= HOSTAPI_TONE_SLOTS) return -1;
+    if (wave != HOSTAPI_WAVE_SINE) return -1; // 未知の波形(トラップしない)
+
+    if (freq_hz < 100) freq_hz = 100;
+    if (freq_hz > 8000) freq_hz = 8000;
+    if (dur_ms < 5) dur_ms = 5;
+    if (dur_ms > 100) dur_ms = 100;
+    if (level < 0) level = 0;
+    if (level > 100) level = 100;
+
+    portENTER_CRITICAL(&s_click_mux);
+    s_tones[slot] = ToneDef{true, (uint16_t)freq_hz, (uint16_t)dur_ms, (uint8_t)level};
+    portEXIT_CRITICAL(&s_click_mux);
+    return 0;
+}
+
+int32_t native_hostapi_tone_play(wasm_exec_env_t exec_env, int32_t slot)
+{
+    (void)exec_env;
+    return tone_play_impl(slot);
+}
+
+int32_t native_hostapi_tone_schedule(wasm_exec_env_t exec_env, int32_t slot,
+                                     int32_t time_ms)
+{
+    (void)exec_env;
+    return tone_schedule_impl(slot, time_ms);
 }
 
 uint32_t native_hostapi_now_ms(wasm_exec_env_t exec_env)
@@ -504,12 +592,14 @@ void hostapi_audio_reset()
     s_click_last_fired = 0;
     s_click_fire_count = 0;
     portEXIT_CRITICAL(&s_click_mux);
+    tone_table_reset(); // トーンパレットも初期状態へ (Phase 7C 契約)
     audio::Volume_adjustment(98);
 }
 
 bool hostapi_register_natives()
 {
     click_timer_ensure();
+    tone_table_reset();
     if (!wasm_runtime_register_natives(
             "env", s_native_symbols,
             sizeof(s_native_symbols) / sizeof(s_native_symbols[0]))) {

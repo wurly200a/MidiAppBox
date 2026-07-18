@@ -83,6 +83,27 @@
  *                          MP3 再生との同時使用は将来の音源 API で整理予定。
  *   hostapi_now_ms() -> u32  起動からの経過ミリ秒(イベントの time_ms と同一時基)。
  *
+ *   hostapi_tone_define(slot, wave, freq_hz, dur_ms, level) -> 0/-1  (Phase 7C, v2)
+ *     slot(0..7)に短い減衰音をパラメトリックに定義する(再定義可)。
+ *     wave: HOSTAPI_WAVE_*(v2 は SINE のみ。未知の値は -1、トラップしない)
+ *     freq_hz 100..8000 / dur_ms 5..100 / level 0..100(範囲外はクランプ)。
+ *     level はトーン固有ゲインで、マスター音量と乗算される。
+ *     エンベロープは指数減衰(dur_ms 終端で約 -30dB)。
+ *     定義はアプリセッション状態: 起動時 slot 0 = 既定クリック
+ *     (1000Hz/30ms/100)、slot 1..7 = 未定義。破棄で消滅。
+ *   hostapi_tone_play(slot) -> 0/-1
+ *     即時発音。未定義スロットは -1。
+ *   hostapi_tone_schedule(slot, time_ms) -> 0/-1
+ *     予約発音。予約の契約は hostapi_click_schedule と共通(下記)で、
+ *     予約はスロットによらず全体で 1 件。パラメータは予約時にスナップショット
+ *     される(発音前に tone_define し直しても発音済み予約には影響しない)。
+ *   発音の重なり(前の音が鳴り終わる前の発音)は v2 ではベストエフォート
+ *   (単声。実機は直列再生)。ポリフォニーとサンプル再生は将来の音源 API で扱う。
+ *
+ *   hostapi_play_click()          ≡ hostapi_tone_play(0)
+ *   hostapi_click_schedule(t)     ≡ hostapi_tone_schedule(0, t)
+ *     (v0/7A 互換。slot 0 を再定義すればこれらの音も変わる)
+ *
  *   hostapi_click_schedule(time_ms) -> 0/-1  (Phase 7A, v2)
  *     time_ms(hostapi_now_ms() と同一時基)にクリック音を発音するよう予約する。
  *     tick 格子(100ms)より細かいタイミング精度が要る発音のための API
@@ -133,6 +154,13 @@ enum {
     HOSTAPI_AUDIO_ERROR    = 4, /* play 失敗。次の play まで保持 */
 };
 
+/* hostapi_tone_define の波形 (Phase 7C) */
+enum {
+    HOSTAPI_WAVE_SINE = 0, /* 減衰サイン(v2 で唯一) */
+    /* 将来: NOISE, SQUARE, ... 追加は非破壊 */
+};
+#define HOSTAPI_TONE_SLOTS 8
+
 /* v1 シンボル一覧(グループ: gfx / input / audio / fs / misc)。
  * v0 の 4 関数(draw_text, fill_rect, play_click, now_ms)はシグネチャ・
  * 挙動とも v0 から不変。 */
@@ -149,10 +177,13 @@ enum {
     X(hostapi_audio_get_state, "()i")     \
     /* fs */                              \
     X(hostapi_fs_list, "(i*~)i")          \
-    /* misc */                            \
+    /* misc / tone */                     \
     X(hostapi_play_click, "()")           \
     X(hostapi_now_ms, "()i")              \
-    X(hostapi_click_schedule, "(i)i")
+    X(hostapi_click_schedule, "(i)i")     \
+    X(hostapi_tone_define, "(iiiii)i")    \
+    X(hostapi_tone_play, "(i)i")          \
+    X(hostapi_tone_schedule, "(ii)i")
 
 /* NativeSymbol 配列の初期化子を生成するヘルパ */
 #define HOSTAPI_SYMBOL_ENTRY(name, sig) { #name, (void*)native_##name, sig, NULL },
