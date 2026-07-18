@@ -26,9 +26,12 @@ extern const uint8_t bench_wasm_start[] asm("_binary_bench_wasm_start");
 extern const uint8_t bench_wasm_end[]   asm("_binary_bench_wasm_end");
 
 // WAMR グローバルヒーププール(内部 SRAM, BSS)。
-// Phase 4 実測でデモ規模の消費は ~27KB。128KB だと FATFS マウントに必要な
-// 連続ヒープ(sector 4096 × max_files 8 ≈ 38KB)が確保できなくなるため 64KB。
-static uint8_t s_wamr_heap[64 * 1024];
+// Phase 4 実測でデモ規模の消費は ~27KB。Phase 7B でクリックタスク等の静的確保が
+// 増えた際、system heap の最大連続ブロックが 15KB まで細り linear memory
+// (~20KB 連続)が確保できなくなったため、64KB → 48KB に縮小して静的メモリを
+// 返却(実測消費に対し余裕 ~20KB)。プール枯渇時は instantiate が
+// 「allocate memory failed」(linear ではなく)で落ちるので区別できる。
+static uint8_t s_wamr_heap[48 * 1024];
 
 namespace wasmrt {
 

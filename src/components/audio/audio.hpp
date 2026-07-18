@@ -42,7 +42,8 @@ public:
     // WASM デモモードのクリック音用)
     bool init_i2s_only(uint32_t sample_rate_hz = 44100, uint8_t bits = 16, bool stereo = true) noexcept;
 
-    // 生成 PCM のクリック音(1kHz 減衰サイン ~30ms)を I2S へ書く
+    // クリック音(1kHz 減衰サイン ~30ms)の発音を専用タスクに依頼する。
+    // 呼び出し側(wasm スレッド / esp_timer コールバック)はブロックしない。
     bool play_click() noexcept;
 
     // Start playback of a file via audio_player when available (fallback stubs otherwise)
@@ -62,6 +63,9 @@ private:
     bool ensure_i2s(uint32_t rate_hz, uint8_t bits, bool stereo) noexcept;
     bool reconfig_rate(uint32_t rate_hz, uint32_t bits_cfg, i2s_slot_mode_t ch) noexcept;
     bool i2s_write(void* data, size_t len, uint32_t timeout_ms, size_t* written = nullptr) noexcept;
+    void ensure_click_task() noexcept;
+    void click_task_loop() noexcept;
+    void click_write_now() noexcept;
 #if HAVE_ESP_AUDIO_PLAYER
     static esp_err_t write_fn(void* audio_buffer, size_t len, size_t* bytes_written, uint32_t timeout_ms);
     static esp_err_t clk_set_fn(uint32_t rate, uint32_t bits_cfg, i2s_slot_mode_t ch);
@@ -85,6 +89,9 @@ private:
     // audio_player synchronization
     static Mp3Player* s_self; // for static callbacks
     QueueHandle_t event_queue_ = nullptr;
+    // クリック発音タスク(Phase 7B fix: DMA プリフェッチ再生対策)
+    SemaphoreHandle_t click_sem_ = nullptr;
+    TaskHandle_t click_task_ = nullptr;
 #if HAVE_ESP_AUDIO_PLAYER
     audio_player_callback_event_t expected_event_{};
     audio_player_callback_event_t event_{};

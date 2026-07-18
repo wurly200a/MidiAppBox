@@ -37,7 +37,7 @@
 #define MENU_ROW_GAP 2
 #define MENU_STATUS_Y 220
 
-static uint8_t s_wamr_heap[64 * 1024];
+static uint8_t s_wamr_heap[48 * 1024]; /* 実機(Phase 7B で 64→48KB)と同一 */
 
 static NativeSymbol s_native_symbols[] = {
     HOSTAPI_NATIVE_SYMBOLS(HOSTAPI_SYMBOL_ENTRY)

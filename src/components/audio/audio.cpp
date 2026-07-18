@@ -30,6 +30,7 @@ Mp3Player::~Mp3Player() {
 
 bool Mp3Player::init(uint32_t sample_rate_hz, uint8_t bits, bool stereo) noexcept {
     if (!ensure_i2s(sample_rate_hz, bits, stereo)) return false;
+    ensure_click_task();
     s_self = this;
 #if HAVE_ESP_AUDIO_PLAYER
     audio_player_config_t config{};
@@ -94,11 +95,56 @@ bool Mp3Player::ensure_i2s(uint32_t rate_hz, uint8_t bits, bool stereo) noexcept
 }
 
 bool Mp3Player::init_i2s_only(uint32_t sample_rate_hz, uint8_t bits, bool stereo) noexcept {
-    return ensure_i2s(sample_rate_hz, bits, stereo);
+    if (!ensure_i2s(sample_rate_hz, bits, stereo)) return false;
+    ensure_click_task();
+    return true;
 }
 
+// 発音依頼(ノンブロッキング)。実書き込みは click_task_loop が行う。
+// 二重クリック対策(Phase 7B fix): i2s_channel_write 直書きだと、クリック終端の
+// DMA アンダーフロー時に auto_clear とプリフェッチが競合し、クリック先頭が入った
+// 古いディスクリプタが 1 本再生される(実測: 全拍の ~25% で 26-27ms 後に再発音)。
+// 対策はゼロパディング書き込み(下記)で、それがブロッキングになるため専用タスク化。
 bool Mp3Player::play_click() noexcept {
-    if (!tx_) return false;
+    if (!click_sem_) return false;
+    xSemaphoreGive(click_sem_);
+    return true;
+}
+
+// タスクスタック等は静的確保(BSS)。ヒープから取ると最大連続ブロックを
+// 分断して WASM の linear memory 確保(~20KB 連続)を壊すため(6B の教訓)。
+static uint8_t s_click_stack[4096];
+static StaticTask_t s_click_tcb;
+static StaticSemaphore_t s_click_sem_buf;
+
+void Mp3Player::ensure_click_task() noexcept {
+    if (click_task_) return;
+    click_sem_ = xSemaphoreCreateBinaryStatic(&s_click_sem_buf);
+    if (!click_sem_) return;
+    auto fn = [](void* arg) { static_cast<Mp3Player*>(arg)->click_task_loop(); };
+    click_task_ = xTaskCreateStatic(fn, "click", sizeof(s_click_stack), this, 18,
+                                    s_click_stack, &s_click_tcb);
+    if (!click_task_) {
+        ESP_LOGE(TAG, "click task create failed");
+    }
+}
+
+void Mp3Player::click_task_loop() noexcept {
+    for (;;) {
+        if (xSemaphoreTake(click_sem_, portMAX_DELAY) == pdTRUE) {
+            click_write_now();
+        }
+    }
+}
+
+void Mp3Player::click_write_now() noexcept {
+    if (!tx_) return;
+
+    // MP3(22.05kHz 等)再生後に I2S レートが変わったままだと半分のピッチで
+    // 鳴るため、クリック前に 44.1kHz へ戻す(同一設定なら reconfig は no-op)
+    if (cur_rate_ != 44100 || cur_bits_ != 16 || !cur_stereo_) {
+        if (!ensure_i2s(44100, 16, true)) return;
+    }
 
     // 1kHz 減衰サイン 30ms @44.1kHz 16bit ステレオ。初回に生成してキャッシュ。
     constexpr int kSampleRate = 44100;
@@ -118,16 +164,28 @@ bool Mp3Player::play_click() noexcept {
         generated = true;
     }
 
-    // マスター音量 (Phase 7A): キャッシュには焼き込まず出力直前にスケール。
-    // 音量変更は次の発音から有効(契約)。
-    static int16_t scratch[kFrames * 2];
+    // マスター音量: キャッシュには焼き込まず、チャンク単位でスケールして書く
+    // (5.3KB の静的スクラッチを持たないため。音量変更は次の発音から有効)。
     const int vol = volume_.load();
-    for (int i = 0; i < kFrames * 2; ++i) {
-        scratch[i] = (int16_t)((int32_t)buf[i] * vol / 100);
+    int16_t chunk[240 * 2]; // 1 DMA ディスクリプタぶん(タスクスタック上)
+    int off = 0;
+    while (off < kFrames * 2) {
+        int n = kFrames * 2 - off;
+        if (n > (int)(sizeof(chunk) / sizeof(chunk[0]))) n = sizeof(chunk) / sizeof(chunk[0]);
+        for (int i = 0; i < n; ++i) {
+            chunk[i] = (int16_t)((int32_t)buf[off + i] * vol / 100);
+        }
+        i2s_write(chunk, n * sizeof(int16_t), 100);
+        off += n;
     }
-    // アイドル時は DMA 深さ(既定 6x240=1440 フレーム ≒32.6ms)にクリック
-    // (1323 フレーム)が丸ごと収まるため、この write は実質ノンブロッキング
-    return i2s_write(scratch, sizeof(scratch), 100);
+
+    // DMA リング(既定 6 ディスクリプタ × 240 フレーム)を丸ごとゼロで上書きする。
+    // アンダーフロー時に古いディスクリプタがプリフェッチ再生されても無音になる。
+    // 合計 ~63ms ぶんの書き込みでブロックするが、専用タスクなので無害。
+    static const int16_t zeros[240 * 2] = {};
+    for (int i = 0; i < 6; ++i) {
+        i2s_write((void*)zeros, sizeof(zeros), 100);
+    }
 }
 
 bool Mp3Player::reconfig_rate(uint32_t rate_hz, uint32_t bits_cfg, i2s_slot_mode_t ch) noexcept {
