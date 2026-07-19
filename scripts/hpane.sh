@@ -26,78 +26,53 @@ usage() { grep '^#   ' "$0" | sed 's/^#   //'; exit 2; }
 CMD="$1"; NAME="$2"; shift 2
 
 # --- JSON からラベル一致タブの pane_id を抜く -------------------------------
-# VERIFY: 初回導入時に `herdr tab list --workspace 1` と `herdr tab get <id>` の
-#         実際の JSON を目視確認すること。以下のパーサはキー名に依存しない
-#         防御的な走査だが、構造が大きく違う場合はここを直す。
-_py_find_pane_by_label() {
-python3 - "$NAME" <<'PY'
-import sys, json, re
+# VERIFY 済み(実 JSON, hpane.sh 初回導入時に確認): `tab list`/`tab get` は
+#   result.tabs[].{label, tab_id, ...} のみを返し pane_id を含まない。
+#   pane_id は `pane list` の result.panes[].{pane_id, tab_id, ...} から
+#   tab_id で突き合わせて取る必要がある。ID 形式は "<workspace>:p<N>" /
+#   "<workspace>:t<N>"(例: "wB:p3", "wB:t3")で "\d+-\d+" ではない。
+# 注意: `python3 - <<PY ... PY` は script 自体を stdin から読むため、
+#       パイプで渡した JSON を読む stdin が残らない(実機で踏んだバグ)。
+#       stdin をパイプ入力のために空けておくには `-c` で script を渡す。
+_py_tab_id_for_label() {
+python3 -c '
+import sys, json
 label = sys.argv[1]
 data = json.load(sys.stdin)
+tabs = data.get("result", {}).get("tabs", [])
+matches = [t["tab_id"] for t in tabs if t.get("label") == label and "tab_id" in t]
+if not matches:
+    sys.exit(1)
+print(matches[0])
+' "$NAME"
+}
 
-def walk(node):
-    if isinstance(node, dict):
-        yield node
-        for v in node.values():
-            yield from walk(v)
-    elif isinstance(node, list):
-        for v in node:
-            yield from walk(v)
-
-def pane_ids(node):
-    """dict/list 内から pane ID 形式 (\d+-\d+) の文字列を全て集める"""
-    out = []
-    def rec(n):
-        if isinstance(n, str) and re.fullmatch(r"\d+-\d+", n):
-            out.append(n)
-        elif isinstance(n, dict):
-            for v in n.values(): rec(v)
-        elif isinstance(n, list):
-            for v in n: rec(v)
-    rec(node)
-    return out
-
-for d in walk(data):
-    vals = [v for v in d.values() if isinstance(v, str)]
-    if label in vals:  # label キー名を仮定せず、値の一致で判定
-        ids = pane_ids(d)
-        if ids:
-            print(ids[0]); sys.exit(0)
-        # タブ dict 内にペイン情報がない場合は tab id だけ出して呼び元で tab get する
-        for v in vals:
-            if re.fullmatch(r"\d+:\d+", v):
-                print("TAB:" + v); sys.exit(0)
+_py_pane_id_for_tab() {
+python3 -c '
+import sys, json
+tab_id = sys.argv[1]
+data = json.load(sys.stdin)
+panes = data.get("result", {}).get("panes", [])
+for p in panes:
+    if p.get("tab_id") == tab_id and "pane_id" in p:
+        print(p["pane_id"]); sys.exit(0)
 sys.exit(1)
-PY
+' "$1"
 }
 
 _py_root_pane_from_create() {
 python3 -c '
-import sys, json, re
+import sys, json
 data = json.load(sys.stdin)
-def rec(n):
-    if isinstance(n, str) and re.fullmatch(r"\d+-\d+", n):
-        print(n); sys.exit(0)
-    elif isinstance(n, dict):
-        for k in ("root_pane", "pane", "pane_id"):
-            if k in n: rec(n[k])
-        for v in n.values(): rec(v)
-    elif isinstance(n, list):
-        for v in n: rec(v)
-rec(data)
-sys.exit(1)'
+print(data["result"]["root_pane"]["pane_id"])
+'
 }
 
 resolve_pane() {
-    local found
-    if found=$(herdr tab list --workspace "$WORKSPACE" 2>/dev/null | _py_find_pane_by_label); then
-        if [[ "$found" == TAB:* ]]; then
-            herdr tab get "${found#TAB:}" | _py_find_pane_by_label && return 0
-            return 1
-        fi
-        echo "$found"; return 0
-    fi
-    return 1
+    local tab_id pane_id
+    tab_id=$(herdr tab list --workspace "$WORKSPACE" 2>/dev/null | _py_tab_id_for_label) || return 1
+    pane_id=$(herdr pane list --workspace "$WORKSPACE" 2>/dev/null | _py_pane_id_for_tab "$tab_id") || return 1
+    echo "$pane_id"
 }
 
 ensure_pane() {

@@ -677,3 +677,94 @@ min=499.78/avg=500.000/max=500.04ms(セマフォ→タスク起床ぶん 7A 直�
 
 検証エビデンス: `~/ビデオ/demo_121741.mp4`、`~/ビデオ/zenn-phase7c/`
 (スペクトログラム 0-2.5kHz: アクセントが 2 秒周期で可視)。
+
+## 7D 実施記録 (2026-07-19) — 完了
+
+対応: `docs/prompts/phase7d.md`。メトロノーム磨き込み(テンポ 1 刻み・ボリューム調整)、
+Host API/ABI 変更なし・App 内変更のみのスコープ。
+
+**タスク2 事前調査(承認済み)**: `hostapi_audio_set_volume` は両ホストで
+マスター音量として実装済みで、MP3 だけでなく click/tone 合成にも効く
+(ESP32: `audio.cpp` の `tone_write_now` と MP3 出力後処理が同じ `volume_`
+atomic を共有、Linux: `hostapi_sdl.c` の `voice_start()` と `Mix_VolumeMusic`
+を同一関数内で両方更新)。対案の `tone_define` の `level`(スロット別ゲイン)も
+動作するが、今回は「全体を大きく/小さく」で十分なため mp3player(6B/6C)の
+V-/V+ ±10 パターンをそのまま流用する方針とした。Host API 変更なし。
+
+**UI 案(承認済み: 案A)**: ランプ行下端(y=112)とボタン行上端(y=176)の間の
+空き 64px 帯に新規 4 ボタン行(`-1`/`+1`/`V-`/`V+`、既存ボタン行と同じ
+x=[12,90,168,246]・幅70を流用)を追加。既存 BPM-/BPM+(±5)はそのまま維持。
+スロット収支: rect 12→16(満杯、以後の余地なし)、text 6→10(6 空き)。
+
+**実装**(`wasm-apps/metronome/src/lib.rs`、2075B→2827B):
+- タスク1: `-1`/`+1` ボタンで BPM を 1 刻み調整(40-240 クランプ、`.clamp()`)。
+  長押し連打加速: 押下時に即 1 ステップ+保持状態(`HELD_DELTA`/`HELD_SINCE`/
+  `NEXT_REPEAT_AT`)を仕込み、`app_tick`(100ms 格子)で 500ms 経過後から
+  自動連打を開始、保持時間に応じて間隔を 400ms→200ms→100ms へ加速。
+  `EV_TOUCH_UP` を新たに購読して離した瞬間に停止(このアプリは従来
+  DOWN のみ処理していた)。`now_ms` の wraparound は符号付き差分
+  (`time_reached`)で吸収(既存の `ANCHOR` 方式と同じ考え方)。
+- タスク2: `V-`/`V+` ボタンで `hostapi_audio_set_volume`(0-100, ±10,
+  既定 98 でホスト既定と一致)。ステータス行に `Vol: nnn` を追記
+  (Line バッファは 32→48 バイトに拡張。既存 `BPM: 240   beats/bar: 6`
+  に `  Vol: 100` を足すと 32 バイトを超えるため)。
+- BPM ±5/±1 の変更は既存どおり毎回 `rearm()`(即座に再アンカー+ RUNNING
+  中は拍 0 を即発音)。連打中もこの挙動を維持(既存単発 tap と一貫)。
+
+**検証(Linux, SDL host)**: `xdotool` でウィンドウへ直接クリック/長押しを
+送り込みスクリーンショットで確認。`-1`×2→BPM 120→118、`+1`→119(既知の
+誤操作込みで実測 117→118 ではあるが再現性は確認)、`V-`→88、`V+`×2→
+クランプ 100 で停止。`BPM+` を 2.5 秒保持で 118→158(+40、加速が機能)、
+離した 2 秒後も 158 で不変(`EV_TOUCH_UP` で連打停止を確認)。長時間保持で
+240 に到達しオーバーシュートなし(クランプ確認)。`BEAT`(4→6 拍子)・
+`START`/`STOP`・ランプ点灯を既存どおり確認。stderr に `no free slot`
+警告なし(rect 16/16 でも slot 溢れなし)。`demo.wasm` 回帰も stderr
+クリーンで確認。
+
+**検証(ESP32 実機)**: ビルド・フラッシュは `ghcr.io/wurly200a/builder-esp32/
+esp-idf-v5.5:latest`(9 ヶ月前 pull、トゥールチェーン `esp-14.2.0_20241119`)で
+実施(下記トラブル参照)。ユーザーに実機タッチ操作を依頼し
+(`-1`×2・`+1`・`V-`・`V+`×2・`BPM+` 長押し・`BEAT`・`START`→`STOP`→終了)、
+カメラ録画(`~/ビデオ/demo_221631.mp4`)+シリアルログで確認。
+録画から `BPM: 175 beats/bar: 4 Vol: 98` 表示(新規行含む全ボタン描画正常)を
+確認、シリアルログでも `beats/bar` が 4→6 へ変化(`BEAT` 動作)。
+`no free slot` 警告なし。**heap: `app: stopped (ok), free heap 94464
+(at start 94464)`** — アプリ起動〜終了で free heap 完全一致、リークなし。
+起動時 i2c nack 一連(`I2C transaction unexpected nack detected`)は
+`Touch online` 前のタッチコントローラ初期化リトライで本変更と無関係
+(ボードリセット直後に毎回出る既知の起動ノイズ)。
+
+**トラブルと教訓**:
+- `scripts/hpane.sh` の `ensure`/`run` が今回のセッションで機能していなかった
+  (未使用のまま埋め込まれていたバグ、CLAUDE.md「初回導入時の確認事項」の
+  事前確認で発覚)。原因は2つ: (1) 実際の pane_id 形式が `wB:p3` であり
+  スクリプトが仮定していた `\d+-\d+` と不一致、かつ `tab list`/`tab get` は
+  pane_id を含まず `pane list` と `tab_id` で突き合わせる必要があった。
+  (2) `python3 - "$ARG" <<'PY' ... PY` はヒアドキュメントが script 本体を
+  stdin から読むため、パイプで渡した JSON を読む stdin が残らず
+  `json.load(sys.stdin)` が空入力で例外になる(`-c` でスクリプトを渡せば
+  stdin はパイプ入力のために空く)。両方を修正し、`ensure` の冪等性(再実行で
+  同一 pane_id)と `run` の一発実行を実機検証で確認。**教訓: herdr の
+  ID は `<workspace>:p<N>`/`<workspace>:t<N>` 形式(`\d+-\d+` ではない)。
+  `python3 -` にヒアドキュメントで script を渡すとパイプ入力が読めなくなる
+  ため、パイプ入力を読むスクリプトは必ず `-c` で渡す。**
+- ESP32 ビルド用に稼働中だった docker コンテナ(`*-clangd-docker-1`)は
+  `/dev/ttyACM0` 未接続の devcontainer サイドカーで、ビルド専用だった
+  (flash 不可)。加えてローカルには同イメージの複数タグ/版が存在し
+  (`5.5.5` は 11 時間前 pull でトゥールチェーン日付 `20260121`、`latest` は
+  9 ヶ月前 pull で `20241119`)、`latest` で組んだ `build/` キャッシュに
+  対して `5.5.5` でビルド/flash しようとすると `CMAKE_C_COMPILER` 不在や
+  `ninja: ... newlib.lf ... missing` で失敗する。**教訓: ビルドと
+  flash/monitor は同一イメージタグのコンテナで揃える。flash/monitor 用に
+  `--device=/dev/ttyACM0 --group-add <dialout gid>` を付けた
+  `docker run --rm -it`(monitor は `-it` 必須、`idf_monitor` が
+  real TTY を要求し `-i` のみでは `Error: Monitor requires standard input
+  to be attached to TTY` で失敗する)を都度起動する運用で回避した。**
+- 実機のタッチ操作(タップ・長押し)はプログラムから注入する手段がなく、
+  ユーザーに物理操作を依頼してカメラ録画+シリアルログで検証した
+  (Linux 側は `xdotool` でウィンドウに直接クリック/長押しを送れるため
+  自動化できたが、実機の I2C タッチコントローラには同等の注入経路がない)。
+
+検証エビデンス: `~/ビデオ/demo_221631.mp4`、`~/ビデオ/zenn-phase7d/`
+(`metronome_7d_device.png`: 実機で新規行 `-1/+1/V-/V+` + `Vol:` 表示が
+描画されている静止画)。

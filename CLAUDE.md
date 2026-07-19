@@ -16,11 +16,12 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
   記事の作成・更新作業を行うときは、作業前に必ず全体を読むこと。
 - **docs/poc-results.md**: Phase 4 の計測結果と所見。
 
-## 現在地 (2026-07-18 時点)
+## 現在地 (2026-07-19 時点)
 
-- Phase 7(7A 予約発音 / 7B メトロノーム / 7B-fix DMA 二重クリック / 7C トーンパレット)完了。
+- Phase 7(7A 予約発音 / 7B メトロノーム / 7B-fix DMA 二重クリック / 7C トーンパレット /
+  7D テンポ1刻み・ボリューム調整)完了。詳細は docs/dev-log.md の Phase 7 節。
 - Zenn 連載: 第 1〜7 回公開済み、第 8〜17 回はスケジュール公開設定済み(〜2026-07-28、詳細は docs/zenn.md)。
-- 次の候補: メトロノーム磨き込み(テンポ 1 刻み・ボリューム調整。Host API 変更なしのスコープ)。
+- 次の候補: 未定(Phase 8 のスコープはユーザー指示待ち)。
 
 ## 開発の進め方(このリポジトリでの作業ルール)
 
@@ -133,6 +134,15 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
   高速スクロール行を取りこぼす(6C)。
 - pane の cwd ドリフトに注意。ビルドは絶対パス+成果物のタイムスタンプ/シンボル確認を
   セットで行う(7C)。
+- herdr の pane_id/tab_id は `<workspace>:p<N>`/`<workspace>:t<N>` 形式(`\d+-\d+` ではない)。
+  `tab list`/`tab get` は pane_id を含まないため `pane list` と `tab_id` で突き合わせる必要がある(7D)。
+- `python3 - <<'PY' ... PY`(ヒアドキュメント)は stdin を script 本体で使い切り、
+  パイプ入力を読めない。パイプ入力を読むワンライナーは `python3 -c` で渡す(7D)。
+- ESP32 ビルド用コンテナと flash/monitor 用コンテナはイメージタグを揃える。
+  同名イメージでも tag 違い(pull 時期違い)でトゥールチェーンパスが食い違い、
+  他方の `build/` キャッシュに対して壊れる(7D)。flash/monitor には
+  `--device=/dev/ttyACM0 --group-add <dialout gid>` を付けた `docker run --rm -it`
+  が必要(`-i` のみだと `idf_monitor` が real TTY 要求で失敗)(7D)。
 
 ## 初回セットアップ(ユーザーが一度だけ実施)
 
