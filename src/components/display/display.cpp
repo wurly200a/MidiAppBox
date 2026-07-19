@@ -59,9 +59,9 @@ void Display::init() {
       .task_priority    = 4,
       .task_stack       = 8192,
       .task_affinity    = -1,
+      .task_max_sleep_ms = 500,
+      .task_stack_caps  = MALLOC_CAP_INTERNAL | MALLOC_CAP_DEFAULT,
       .timer_period_ms  = 5,
-      // .task_max_sleep_ms = 10,
-      // .task_stack_caps  = 0,
     };
     ESP_ERROR_CHECK(lvgl_port_init(&lvgl_cfg));
 
