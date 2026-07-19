@@ -26,6 +26,101 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
 - WASM アプリは Rust / `wasm32-unknown-unknown`(WASI 不使用)。
 - 実機ランタイムは WAMR。まず interpreter で動かし、AOT は後続フェーズ。
 
+## シェル実行の原則
+
+シェルで実行するもの(ビルド、フラッシュ、モニタ、カメラ撮影、動作確認)はすべて、
+直接 Bash で実行せず `scripts/hpane.sh` 経由で herdr のペインで実行すること。
+
+- **pane ID を記憶・再利用してはならない。** herdr の pane ID はペインが閉じられると
+  詰められるため永続ではない。必ず `hpane.sh` がラベルから毎回解決する。
+- **`herdr wait output` をビルドログの文言(例: "Project build complete")に対して
+  直接使ってはならない。** 過去のスクロールバックへの誤マッチと文言揺れによる
+  タイムアウトの原因になる。完了待ちは必ず `hpane.sh run` の番兵トークン方式で行う。
+- `hpane.sh run` の exit code がそのままコマンドの成否である。
+  exit 0 以外なら失敗として扱い、`hpane.sh read <name> 100` でログを確認して報告する。
+  exit 124 はタイムアウト。
+
+## ペイン一覧(ラベル固定)
+
+| ラベル | 用途 | 実行形式 |
+|---|---|---|
+| `esp32-build` | ESP32 実機ビルド / フラッシュ | 常に docker を含む一発コマンド(下記) |
+| `esp32-monitor` | シリアルモニタ(常駐) | `send` で起動、`waitfor` でログ待ち |
+| `unix-build` | Linux ホスト(SDL)ビルド / 実行 | 一発コマンド |
+| `camera` | カメラ撮影(ffmpeg / v4l2-ctl) | `send`(常駐)+ `run`(単発) |
+| `zenn` | Zenn ドキュメント作成関連 | 一発コマンド |
+
+新しいラベルを増やす場合は事前にユーザーの承認を得ること。
+
+## 実行形式のルール
+
+- **ペインに対話状態を持たせない。** docker コンテナ内での作業も、ペイン内で
+  `docker exec` シェルに入ったままにせず、毎回一発コマンドとして実行する。
+  これによりペインの状態に依存せず、いつ再開しても同じ手順で再現できる。
+
+```bash
+# ESP32 ビルド(例。コンテナ名・パスはプロジェクトの実際の値に合わせる)
+./scripts/hpane.sh run esp32-build \
+  "docker exec -w /project/src <container> idf.py build" 1800000
+
+# ESP32 フラッシュ
+./scripts/hpane.sh run esp32-build \
+  "docker exec -w /project/src <container> idf.py -p /dev/ttyACM0 flash" 300000
+
+# Linux ホストビルド
+./scripts/hpane.sh run unix-build "cd host_linux && make" 600000
+
+# シリアルモニタ(常駐: run ではなく send + waitfor)
+./scripts/hpane.sh send esp32-monitor \
+  "docker exec -w /project/src <container> idf.py -p /dev/ttyACM0 monitor"
+./scripts/hpane.sh waitfor esp32-monitor "app_main" 30000
+./scripts/hpane.sh read esp32-monitor 80
+```
+
+## タイムアウト既定値(ms)
+
+| 操作 | timeout |
+|---|---|
+| ESP32 フルビルド | 1800000 (30分) |
+| ESP32 インクリメンタルビルド | 600000 (10分) |
+| フラッシュ | 300000 (5分) |
+| Linux ホストビルド | 600000 (10分) |
+| モニタのログ待ち | 30000〜60000 |
+
+タイムアウトした場合は勝手に次へ進まず、`read` でログを確認して状況を報告し停止すること。
+
+## 初回セットアップ(ユーザーが一度だけ実施)
+
+```bash
+# herdr 公式エージェントスキルの導入(Claude Code が herdr 操作を正しく学ぶ)
+npx skills add ogulcancelik/herdr --skill herdr -g
+
+# ヘルパー配置
+chmod +x scripts/hpane.sh
+```
+
+`.claude/settings.local.json` の permissions に以下を追加:
+
+```json
+"Bash(herdr:*)",
+"Bash(./scripts/hpane.sh:*)"
+```
+
+## 初回導入時の確認事項(Claude Code への指示)
+
+`hpane.sh` は `herdr tab list` / `tab get` の JSON 構造をキー名に依存しない形で
+走査しているが、初回のみ以下を実行して実際の構造を確認し、
+`ensure` が正しい pane ID を返すことを検証してから本作業に入ること:
+
+```bash
+herdr tab list --workspace 1
+./scripts/hpane.sh ensure unix-build
+./scripts/hpane.sh run unix-build "echo hello" 10000
+```
+
+問題があれば `hpane.sh` のパーサ部(VERIFY コメント箇所)を実際の JSON に合わせて
+修正し、修正内容を報告すること。
+
 ---
 
 # Phase 0 調査結果 (2026-07-05)
