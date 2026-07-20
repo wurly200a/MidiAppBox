@@ -41,15 +41,13 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
 
 - 「小さいターゲットを定めて、テストし、次を計画する」の反復。各フェーズはビルドが通り
   コミット可能な粒度を保つ。
-- 開発環境は **herdr**。シェル実行はすべて下記「シェル実行の原則」に従い
-  `scripts/hpane.sh` 経由で行う。
+- 開発環境は **herdr**。シェル実行はすべて下記「シェル実行(要点)」と
+  **docs/workflow.md** に従い `scripts/hpane.sh` 経由で行う。
 - Phase 完了まで、ビルド・フラッシュ・モニタ確認を含めて確認なしで自律的に進めてよい。
   各ステップの結果はログとして **docs/dev-log.md** に残すこと。
   実施記録の冒頭には対応するフェーズ指示書(docs/prompts/phaseXX.md)への参照を書く。
-- 実機検証は Web カメラ(/dev/video0)で実機を撮影して行う。録画は `scripts/cam-rec.sh`
-  [出力先ディレクトリ](省略時 `captures/check-workflow/`、露出・フォーカス自動適用、
-  Enter で停止)、静止画は `scripts/cam-still.sh`。`camera` ペインで `send` 起動し、
-  空文字送信(=Enter)で停止する(`~/ビデオ/rec.sh` からの移植、A/V ずれは既知課題のまま)。
+- 実機検証は Web カメラ(/dev/video0)で実機を撮影して行う
+  (`scripts/cam-rec.sh` / `cam-still.sh`。具体的な使い方は workflow.md §3.3)。
   作業確認用の一時キャプチャは `captures/`(.gitignore 対象)、Zenn 記事の素材として
   残すものは従来どおり `~/ビデオ/zenn-phaseXX/` にコピーする。
 - 依存追加は最小限。追加時は本ファイル末尾「依存の記録」に理由を残す。
@@ -63,78 +61,24 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
 - WASM アプリは Rust / `wasm32-unknown-unknown`(WASI 不使用)。
 - 実機ランタイムは WAMR。まず interpreter で動かし、AOT は後続フェーズ。
 
-## シェル実行の原則
+## シェル実行(要点)
 
 シェルで実行するもの(ビルド、フラッシュ、モニタ、カメラ撮影、動作確認)はすべて、
-直接 Bash で実行せず `scripts/hpane.sh` 経由で herdr のペインで実行すること。
+直接 Bash ではなく `scripts/hpane.sh` 経由で herdr のペインで実行する。
+**ペイン構成、コマンドの具体形、タイムアウト既定値、初回セットアップ、
+セッション初回の確認手順の原本は docs/workflow.md。**
+シェル実行を伴う作業の開始前に必ず読むこと。
 
-- **pane ID を記憶・再利用してはならない。** herdr の pane ID はペインが閉じられると
-  詰められるため永続ではない。必ず `hpane.sh` がラベルから毎回解決する。
-- **`herdr wait output` をビルドログの文言(例: "Project build complete")に対して
-  直接使ってはならない。** 過去のスクロールバックへの誤マッチと文言揺れによる
-  タイムアウトの原因になる。完了待ちは必ず `hpane.sh run` の番兵トークン方式で行う。
-- `hpane.sh run` の exit code がそのままコマンドの成否である。
-  exit 0 以外なら失敗として扱い、`hpane.sh read <name> 100` でログを確認して報告する。
-  exit 124 はタイムアウト。
+常時従う要点(詳細と根拠は workflow.md §1・§6):
 
-## ペイン一覧(ラベル固定)
-
-全ラベルは **herdr の共有タブ 1 つ(`midiappbox-panes`)の中に 3 列 x 2 行で分割配置**
-される(`scripts/hpane.sh` が `herdr pane split`/`pane rename` でペイン単位のラベルを
-解決・作成する。タブ単位ではなくペイン単位のラベルなので `herdr tab list` では見えない
-点に注意)。`ensure`/`run`/`send`/`waitfor`/`read` の呼び出しインタフェースは
-「ラベルごとに別タブ」だった旧方式と変わらない。
-
-| ラベル | 用途 | 実行形式 |
-|---|---|---|
-| `esp32-build` | ESP32 実機ビルド / フラッシュ | 常に docker を含む一発コマンド(下記) |
-| `esp32-monitor` | シリアルモニタ(常駐) | `send` で起動、`waitfor` でログ待ち |
-| `unix-build` | Linux ホスト(SDL)ビルド / 実行 | 一発コマンド |
-| `camera` | カメラ撮影(ffmpeg / v4l2-ctl、`scripts/cam-rec.sh`/`cam-still.sh`) | `send`(常駐)+ `run`(単発) |
-| `zenn` | Zenn ドキュメント作成関連 | 一発コマンド |
-| `screen` | Linux ホスト(SDL ウィンドウ)の画面撮影用(`scripts/screen-rec.sh`/`screen-still.sh`)。**現状この環境では x11grab が機能せず未使用・将来検討** | 一発コマンド(保留) |
-
-新しいラベルを増やす場合は事前にユーザーの承認を得ること。
-
-## 実行形式のルール
-
-- **ペインに対話状態を持たせない。** docker コンテナ内での作業も、ペイン内で
-  `docker exec` シェルに入ったままにせず、毎回一発コマンドとして実行する。
-  これによりペインの状態に依存せず、いつ再開しても同じ手順で再現できる。
-
-```bash
-# ESP32 ビルド(例。<container> は README のタグ ghcr.io/.../esp-idf-v5.5:5.5.5 で
-# 起動した持続コンテナの名前/ID。devcontainer CLI(devcontainer up/exec)が作る
-# UID remap 済みイメージは使わないこと(教訓チェックリスト参照)。
-# bash -c は非ログインシェルのため IDF の export.sh を明示 source する)
-./scripts/hpane.sh run esp32-build \
-  "docker exec -w /workspaces/MidiAppBox/src <container> bash -c 'source /opt/esp-idf/export.sh && idf.py build'" 1800000
-
-# ESP32 フラッシュ
-./scripts/hpane.sh run esp32-build \
-  "docker exec -w /workspaces/MidiAppBox/src <container> bash -c 'source /opt/esp-idf/export.sh && idf.py -p /dev/ttyACM0 flash'" 300000
-
-# Linux ホストビルド
-./scripts/hpane.sh run unix-build "cd host_linux && make" 600000
-
-# シリアルモニタ(常駐: run ではなく send + waitfor)
-./scripts/hpane.sh send esp32-monitor \
-  "docker exec -w /project/src <container> idf.py -p /dev/ttyACM0 monitor"
-./scripts/hpane.sh waitfor esp32-monitor "app_main" 30000
-./scripts/hpane.sh read esp32-monitor 80
-```
-
-## タイムアウト既定値(ms)
-
-| 操作 | timeout |
-|---|---|
-| ESP32 フルビルド | 1800000 (30分) |
-| ESP32 インクリメンタルビルド | 600000 (10分) |
-| フラッシュ | 300000 (5分) |
-| Linux ホストビルド | 600000 (10分) |
-| モニタのログ待ち | 30000〜60000 |
-
-タイムアウトした場合は勝手に次へ進まず、`read` でログを確認して状況を報告し停止すること。
+- 完了待ちは `hpane.sh run` の番兵トークン方式のみ。`herdr wait output` を
+  ログ文言に直接マッチさせない。exit code が成否(124 はタイムアウト)。
+  失敗・タイムアウト時は `read` でログを確認して報告し停止する。勝手に次へ進まない。
+- pane ID を記憶・再利用しない(ラベルから毎回解決)。ペインに対話状態を
+  持たせない(毎回一発コマンド)。新しいラベルの追加は事前にユーザー承認。
+- Docker イメージタグはリポジトリトップ README.md 準拠。build と flash/monitor は
+  同一タグ。devcontainer CLI は使わない。
+- 推奨手順からの逸脱・改善は、実行前に提案して承認を得る(workflow.md §5)。
 
 ## 教訓チェックリスト(詳細な経緯は docs/dev-log.md の該当 Phase)
 
@@ -200,38 +144,6 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
   挟んでも解消せず)。ボタン/メニュークリックに依存する自動 UI 操作は現状信頼できない。
   ランチャー経由が必要なければ単発実行モード(`./build/midibox_host <app>.wasm`
   で直接起動)を使うとメニュークリック自体を回避できる(check-workflow)。
-
-## 初回セットアップ(ユーザーが一度だけ実施)
-
-```bash
-# herdr 公式エージェントスキルの導入(Claude Code が herdr 操作を正しく学ぶ)
-npx skills add ogulcancelik/herdr --skill herdr -g
-
-# ヘルパー配置
-chmod +x scripts/hpane.sh
-```
-
-`.claude/settings.local.json` の permissions に以下を追加:
-
-```json
-"Bash(herdr:*)",
-"Bash(./scripts/hpane.sh:*)"
-```
-
-## 初回導入時の確認事項(Claude Code への指示)
-
-`hpane.sh` は `herdr tab list` / `tab get` の JSON 構造をキー名に依存しない形で
-走査しているが、初回のみ以下を実行して実際の構造を確認し、
-`ensure` が正しい pane ID を返すことを検証してから本作業に入ること:
-
-```bash
-herdr tab list --workspace 1
-./scripts/hpane.sh ensure unix-build
-./scripts/hpane.sh run unix-build "echo hello" 10000
-```
-
-問題があれば `hpane.sh` のパーサ部(VERIFY コメント箇所)を実際の JSON に合わせて
-修正し、修正内容を報告すること。
 
 # 依存の記録
 
