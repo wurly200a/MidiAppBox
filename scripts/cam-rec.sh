@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 # scripts/cam-rec.sh — Webカメラ(/dev/video0)録画。~/ビデオ/rec.sh の移植。
-# 既知課題「録画の動画と音声のずれ」は本チェックでは修正せず現状のまま移植する。
+#
+# 動画・音声ずれの調査・対処 (2026-07-20, check-workflow-routine 後の別タスク):
+#   - v4l2/pulse とも thread_queue_size 既定(8)を超えて demuxer スレッドが
+#     ブロックする警告が録画開始直後に出ていたため thread_queue_size を拡張。
+#   - v4l2 は既定でカーネル(モノトニック)由来のタイムスタンプ、pulse は既定で
+#     壁時計由来のタイムスタンプと、入力ごとに時刻系が異なっていたため v4l2 側を
+#     -timestamps abs に統一。
+#   - 上記修正後もメトロノームの点滅(映像)とクリック音(音声)を突き合わせて
+#     実測したところ、音声が映像よりおよそ150〜210ms 遅れる一定オフセットが
+#     修正前後で変わらず残った。低照度対策の固定露光(exposure_time_absolute=451
+#     ≒45ms/フレーム)+ USB MJPEG の読み出し・デコード遅延に由来するカメラ
+#     ハードウェア側の構造的遅延と推定し、-itsoffset -0.2 で音声を約200ms
+#     前倒しする対症療法を追加、実測でオフセットを約210ms→約10msまで低減
+#     できることを確認した。
+#   - 200ms は本機(Logitech StreamCam)・この露光設定での経験値であり、
+#     機種や exposure_time_absolute を変えた場合はズレ量も変わりうる点に注意
+#     (詳細は docs/dev-log.md)。
 #
 # 使い方: scripts/cam-rec.sh [出力先ディレクトリ]  (省略時 captures/check-workflow/)
 # 停止: 標準入力に空行(Enter)を送る。
@@ -25,8 +41,9 @@ apply_settings() {
 
 # 1. 録画をバックグラウンドで開始
 ffmpeg -nostdin -loglevel warning \
-       -f v4l2 -input_format mjpeg -video_size 1280x720 -framerate 30 -i "$DEV" \
-       -f pulse -i default \
+       -f v4l2 -thread_queue_size 1024 -timestamps abs \
+         -input_format mjpeg -video_size 1280x720 -framerate 30 -i "$DEV" \
+       -itsoffset -0.2 -f pulse -thread_queue_size 1024 -i default \
        -c:v libx264 -preset fast -crf 20 -pix_fmt yuv420p -c:a aac \
        -movflags +faststart "$OUT" &
 FFPID=$!

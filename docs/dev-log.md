@@ -954,3 +954,59 @@ image header(2048k). Using the size in the binary image header.` が出ていた
   場合に `getwindowpid`/`pgrep -af midibox_host` で対象を照合する手順を追記。
 - **CLAUDE.md 教訓チェックリスト**: 上記 2 点をそれぞれ「herdr / ビルド」
   「Linux ホスト(SDL / GUI 自動化)」節に一行追加。
+
+# cam-rec.sh: 動画・音声ずれの調査と対処
+
+## 実施記録 (2026-07-20) — 完了
+
+check-workflow-routine の完了報告で触れた既知課題(`docs/workflow.md` の
+「cam-rec.sh の動画・音声ずれ」)について、ユーザー依頼で別タスクとして調査した。
+
+**原因調査**:
+1. `scripts/cam-rec.sh` の ffmpeg コマンドを確認したところ、v4l2(カメラ)と
+   pulse(マイク)を1プロセスで同時キャプチャしている。録画開始直後
+   (`apply_settings()` の初回呼び出しで `auto_exposure` を自動→手動へ切替える
+   タイミング)に v4l2 側→pulse 側の順で `Thread message queue blocking;
+   consider raising the thread_queue_size option (current value: 8)` が
+   各1回だけ出ていた(3秒ごとの再設定ループでは再発しない)。
+2. `ffmpeg -h demuxer=pulse` で pulse 入力は既定 `-wallclock 1`(壁時計基準)、
+   `ffmpeg -h demuxer=video4linux2` で v4l2 入力は既定 `-timestamps default`
+   (カーネル/モノトニック基準)と、**入力ごとに異なる時刻系**を使っていること
+   を確認。1. の起動直後のスタッツが正しく相対オフセットとして反映されない
+   要因と推定した。
+
+**対処 (1段目、ユーザー承認済み)**: `scripts/cam-rec.sh` の ffmpeg 呼び出しに
+`-thread_queue_size 1024`(両入力)・`-timestamps abs`(v4l2 側)を追加。
+再テスト録画で `Thread message queue blocking` 警告は解消。
+
+**効果測定**: 単純な拍手テストでは映像に手が映らず測定に使えなかったため、
+代わりに実機で稼働中だったメトロノームアプリの「ビート表示の点滅(映像)」と
+「クリック音(音声)」を同一デバイス発生源の同期基準として利用。
+`ffmpeg signalstats`(ビート点灯領域の輝度立ち上がり検出)と音声 RMS
+エンベロープのピーク検出で多数のビートをペアリングし、修正前
+(`check-workflow-routine/cam_rec_121459.mp4`)・修正後(1段目)の両方を比較した
+結果、**`Thread message queue blocking` は解消したが、音声が映像よりおよそ
+150〜210ms 遅れる一定オフセットは修正前後で変わらず残存**していることが
+判明した(進行性のドリフトではなく録画全体でほぼ一定)。低照度対策の固定
+露光(`exposure_time_absolute=451` ≒ 45ms/フレーム)+ USB MJPEG カメラの
+読み出し・デコード遅延に由来する、カメラハードウェア側の構造的遅延と推定。
+
+**対処 (2段目、ユーザー承認済み)**: 上記推定に基づき、pulse 入力に
+`-itsoffset -0.2`(音声を約200ms前倒し)を追加する対症療法を検証。
+- 事後処理での検証(既存録画ファイルを `-itsoffset -0.2` で音声のみ再マルチ
+  プレクス)で、ビートオフセットの平均が 210ms → 12.3ms(標準偏差 38ms)に
+  縮小することを確認。
+- `scripts/cam-rec.sh` に本設定を組み込んだ上でライブ録画による実地検証も
+  実施、平均 14.7ms(標準偏差 24.4ms、いずれもカメラのフレーム精度 33ms 相当
+  以内)まで縮小することを確認した。
+
+**結論・注意点**: `scripts/cam-rec.sh` に `-thread_queue_size 1024`・
+`-timestamps abs`(構造的なキュー詰まり・時刻系不一致の修正)と
+`-itsoffset -0.2`(対症療法、経験値)を追加してコミット。ただし 200ms は
+本機(Logitech StreamCam)・この露光設定(`exposure_time_absolute=451`)での
+経験値であり、カメラ機種や露光設定を変えた場合は再調整が必要になる可能性が
+ある旨をスクリプト冒頭コメントと docs/workflow.md §3.3 に記録した。
+
+検証エビデンス: 検証用録画・切り出し音声/フレームはすべて scratchpad
+または `.gitignore` 対象の `captures/` 配下の一時ディレクトリで作業し、
+作業終了後に削除済み(リポジトリに残る成果物なし)。

@@ -167,7 +167,10 @@ docker run -d --name <container> \
 ```
 
 - 生成物は `ffprobe` で h264 / 正常な duration を確認。
-- 既知課題: cam-rec.sh の動画・音声ずれ(修正は別タスク。本書の手順内では触らない)。
+- 動画・音声ずれは調査・対処済み(2026-07-20、check-workflow-routine 後の別タスク。
+  詳細は scripts/cam-rec.sh 冒頭コメントと docs/dev-log.md)。実測でオフセットを
+  約210ms→約10〜15ms(フレーム精度相当)まで低減できているが、対症療法
+  (-itsoffset の経験値)であり、機種・露光設定が変わると再調整が要る点に注意。
 
 ## §4 一巡チェックモード(routine)
 
