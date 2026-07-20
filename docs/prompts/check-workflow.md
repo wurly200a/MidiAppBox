@@ -115,3 +115,50 @@ CLAUDE.md のペイン表にも追加すること。
 ## 本チェック完了後の予定(本フェーズでは着手しない)
 
 - cam-rec.sh の動画・音声ずれの修正(別タスクとして指示予定)。
+
+## 追記 (2026-07-20) — Linux ホストの画面撮影をスコープ外化
+
+- `scripts/screen-rec.sh` / `scripts/screen-still.sh` は実装済みだが、この開発環境
+  (Wayland + XWayland、GNOME/Mutter)では **`ffmpeg -f x11grab` が常に真っ黒**を
+  返し機能しないことを確認した(ウィンドウ位置・画面原点いずれでも同様。Mutter が
+  x11grab の読む X ルートウィンドウへ合成結果を書き戻さないため)。
+  代替として試した GNOME Shell の D-Bus `org.gnome.Shell.Screenshot.ScreenshotArea`
+  も `AccessDenied` で呼べなかった。`xdg-desktop-portal`(ScreenCast)経由なら
+  理論上可能だが初回に対話的な許可ダイアログが必要で、本チェックの
+  「確認なしで自律的に進める」前提と衝突するため、**今回のスコープからは外し、
+  今後の検討課題とする**(ユーザー承認済み)。
+- これに伴い、ステップ2「Linux ホスト」の完了条件を以下に読み替える:
+  - `screen-rec.sh`/`screen-still.sh` によるキャプチャ(mp4/png)は**不要**。
+  - 代わりに、SDL ホストが標準出力に出す操作ログ(`click: ev=(...) ...` /
+    `app started` / `app stopped` 等、`hosts/linux/main.c` `hostapi_sdl.c`)を
+    `hpane.sh read unix-build` で確認し、xdotool 操作が意図どおり届いたことの
+    証跡とする。
+  - stderr に警告(`no free slot` 等)がないことの確認は従来どおり必須。
+- `xdotool`(ウィンドウ検索・ジオメトリ取得・クリック/キー送信)自体は本環境で
+  正常に機能することを確認済み(7D の知見と一致)。将来 x11grab の代替手段
+  (ポータル ScreenCast 等)を採用する際は `scripts/screen-rec.sh`/
+  `screen-still.sh` を土台に流用できる。
+
+## 追記 (2026-07-20) — Linux ホストのメニュークリック検証もスコープ外化
+
+- ランチャーのメニュー行を `xdotool mousemove --sync` + `click` で狙って自動操作
+  しようとしたところ、`getmouselocation` で座標自体は意図どおりと検証できても、
+  **クリックが意図した行に届かない/別の行に届く**という再現性の低い不安定挙動が
+  発生した(`windowactivate` での明示フォーカス、余裕を持たせた `sleep` を挟んでも
+  解消せず)。画面キャプチャが使えないため(前節)、クリックが実際にどこへ届いたかを
+  プログラム側から検証する手段が無く、この状態で「操作確認 OK」と結論づけるのは
+  不誠実と判断した。
+- ユーザー判断により、**Linux ホストのボタンクリック検証(START/STOP 等)も
+  今回のスコープから外す**。原因調査(WM のフォーカス奪取、XWayland の入力注入
+  経路、ウィンドウ ID 再利用によるイベント取りこぼし等)は将来課題。
+- 代わりにステップ2は「**自動化で確実にできる範囲**」に縮小して実施する:
+  - ランチャー経由のメニュークリックは行わず、CI スモーク用の**単発実行モード**
+    (`./build/midibox_host <appの.wasm>`)で metronome.wasm を直接起動する
+    (README 記載の既存モード。メニュー行選択が不要になりクリック不安定性の
+    影響を受けない)。
+  - 起動後、`app_tick` が数秒間正常に回ること(prompt に落ちず event loop
+    継続)・stderr に警告が出ないことを `hpane.sh read` で確認する。
+  - 終了は `xdotool key --window <id> Escape`(単発モードでは ESC = quit。
+    キー送信はクリックと異なり本環境で問題なく機能することを確認済み)。
+  - START/STOP 等のボタン操作自体の検証は行わない(既知の未検証事項として
+    本節に記録する)。

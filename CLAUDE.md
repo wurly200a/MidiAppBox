@@ -21,8 +21,16 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
 - ユーザーとのやりとり(会話・報告・質問)は日本語。
 - git のコミットメッセージは英語。
 
-## 現在地 (2026-07-19 時点)
+## 現在地 (2026-07-20 時点)
 
+- check-workflow(docs/prompts/check-workflow.md)完了。herdr ペイン運用を
+  「ラベルごとに別タブ」から「**共有タブ1つに3列×2行で分割配置**」に変更
+  (`scripts/hpane.sh` 改修。`run`/`send`/`waitfor`/`read` のインタフェースは不変)。
+  撮影スクリプトを `scripts/cam-rec.sh` 等に整備し、出力を `captures/`
+  (.gitignore 対象)に集約。Linux ホストの画面キャプチャ(x11grab)・
+  クリックによる UI 自動操作は本開発環境(Wayland/XWayland + GNOME)の制約で
+  信頼できる形にできず、スコープ外として持ち越し(詳細は
+  docs/prompts/check-workflow.md 追記節、docs/dev-log.md)。
 - Phase 7(7A 予約発音 / 7B メトロノーム / 7B-fix DMA 二重クリック / 7C トーンパレット /
   7D テンポ1刻み・ボリューム調整)完了。詳細は docs/dev-log.md の Phase 7 節。
 - Zenn 連載: 第 1〜7 回公開済み、第 8〜17 回はスケジュール公開設定済み(〜2026-07-28、詳細は docs/zenn.md)。
@@ -37,9 +45,12 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
 - Phase 完了まで、ビルド・フラッシュ・モニタ確認を含めて確認なしで自律的に進めてよい。
   各ステップの結果はログとして **docs/dev-log.md** に残すこと。
   実施記録の冒頭には対応するフェーズ指示書(docs/prompts/phaseXX.md)への参照を書く。
-- 実機検証は Web カメラ(/dev/video0)で実機を撮影して行う。録画は `~/ビデオ/rec.sh`
-  (露出・フォーカス自動適用、Enter で停止)。`camera` ペインで起動し、空文字送信
-  (=Enter)で停止する。動画・静止画は Zenn 記事の素材として `~/ビデオ/zenn-phaseXX/` に残す。
+- 実機検証は Web カメラ(/dev/video0)で実機を撮影して行う。録画は `scripts/cam-rec.sh`
+  [出力先ディレクトリ](省略時 `captures/check-workflow/`、露出・フォーカス自動適用、
+  Enter で停止)、静止画は `scripts/cam-still.sh`。`camera` ペインで `send` 起動し、
+  空文字送信(=Enter)で停止する(`~/ビデオ/rec.sh` からの移植、A/V ずれは既知課題のまま)。
+  作業確認用の一時キャプチャは `captures/`(.gitignore 対象)、Zenn 記事の素材として
+  残すものは従来どおり `~/ビデオ/zenn-phaseXX/` にコピーする。
 - 依存追加は最小限。追加時は本ファイル末尾「依存の記録」に理由を残す。
 - 既存アプリ(demo / bars / mp3player / metronome / clicktest)の回帰を壊さない。
   (旧「MP3 デモモードで分岐」ルールは Phase 6D で解消済み。履歴は docs/dev-log.md 冒頭。)
@@ -67,13 +78,20 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
 
 ## ペイン一覧(ラベル固定)
 
+全ラベルは **herdr の共有タブ 1 つ(`midiappbox-panes`)の中に 3 列 x 2 行で分割配置**
+される(`scripts/hpane.sh` が `herdr pane split`/`pane rename` でペイン単位のラベルを
+解決・作成する。タブ単位ではなくペイン単位のラベルなので `herdr tab list` では見えない
+点に注意)。`ensure`/`run`/`send`/`waitfor`/`read` の呼び出しインタフェースは
+「ラベルごとに別タブ」だった旧方式と変わらない。
+
 | ラベル | 用途 | 実行形式 |
 |---|---|---|
 | `esp32-build` | ESP32 実機ビルド / フラッシュ | 常に docker を含む一発コマンド(下記) |
 | `esp32-monitor` | シリアルモニタ(常駐) | `send` で起動、`waitfor` でログ待ち |
 | `unix-build` | Linux ホスト(SDL)ビルド / 実行 | 一発コマンド |
-| `camera` | カメラ撮影(ffmpeg / v4l2-ctl) | `send`(常駐)+ `run`(単発) |
+| `camera` | カメラ撮影(ffmpeg / v4l2-ctl、`scripts/cam-rec.sh`/`cam-still.sh`) | `send`(常駐)+ `run`(単発) |
 | `zenn` | Zenn ドキュメント作成関連 | 一発コマンド |
+| `screen` | Linux ホスト(SDL ウィンドウ)の画面撮影用(`scripts/screen-rec.sh`/`screen-still.sh`)。**現状この環境では x11grab が機能せず未使用・将来検討** | 一発コマンド(保留) |
 
 新しいラベルを増やす場合は事前にユーザーの承認を得ること。
 
@@ -84,13 +102,16 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
   これによりペインの状態に依存せず、いつ再開しても同じ手順で再現できる。
 
 ```bash
-# ESP32 ビルド(例。コンテナ名・パスはプロジェクトの実際の値に合わせる)
+# ESP32 ビルド(例。<container> は README のタグ ghcr.io/.../esp-idf-v5.5:5.5.5 で
+# 起動した持続コンテナの名前/ID。devcontainer CLI(devcontainer up/exec)が作る
+# UID remap 済みイメージは使わないこと(教訓チェックリスト参照)。
+# bash -c は非ログインシェルのため IDF の export.sh を明示 source する)
 ./scripts/hpane.sh run esp32-build \
-  "docker exec -w /project/src <container> idf.py build" 1800000
+  "docker exec -w /workspaces/MidiAppBox/src <container> bash -c 'source /opt/esp-idf/export.sh && idf.py build'" 1800000
 
 # ESP32 フラッシュ
 ./scripts/hpane.sh run esp32-build \
-  "docker exec -w /project/src <container> idf.py -p /dev/ttyACM0 flash" 300000
+  "docker exec -w /workspaces/MidiAppBox/src <container> bash -c 'source /opt/esp-idf/export.sh && idf.py -p /dev/ttyACM0 flash'" 300000
 
 # Linux ホストビルド
 ./scripts/hpane.sh run unix-build "cd host_linux && make" 600000
@@ -148,6 +169,36 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
   他方の `build/` キャッシュに対して壊れる(7D)。flash/monitor には
   `--device=/dev/ttyACM0 --group-add <dialout gid>` を付けた `docker run --rm -it`
   が必要(`-i` のみだと `idf_monitor` が real TTY 要求で失敗)(7D)。
+- herdr の pane は `herdr pane split <pane_id> --direction right|down` で分割生成でき、
+  `herdr pane rename <pane_id> <label>` でペイン単位に(タブラベルとは別軸の)
+  ラベルを付けられる。`herdr pane list` の各要素の `label` フィールドで直接解決できるため、
+  複数ラベルを 1 タブに同居させて同時視認できる(check-workflow)。
+- **`devcontainer up`/`devcontainer exec`(devcontainer CLI)が作る UID remap 済み
+  イメージは ESP32 ビルドに使わないこと。** README と同じ生イメージへの
+  `docker run` + `docker exec` では通る同一ソース・同一 pin バージョンの
+  managed component が、devcontainer CLI 経由のビルドだと `-Wignored-qualifiers`
+  が `-Werror` 化されてビルド失敗する現象を確認(根本原因未特定、check-workflow で回避)。
+- `docker run ... bash -lc '...'` はログインシェル扱いで `~/.bashrc`
+  (IDF の `export.sh` を source している)を読まない。非対話一発コマンドで
+  `idf.py` を使うには `bash -c 'source /opt/esp-idf/export.sh && idf.py ...'`
+  のように明示 source すること(check-workflow)。
+- `managed_components/`(gitignore 対象)を「再取得可能なキャッシュ」と即断して
+  中身を確認せず `rm -rf` してはならない。ハッシュ不一致で `idf.py fullclean` が
+  保護的に停止した場合、削除前に該当ファイルの差分を確認すること
+  (check-workflow で、ローカル修正が入っていた可能性のあるファイルを不用意に
+  削除してしまった)。
+
+### Linux ホスト(SDL / GUI 自動化)
+- この開発環境(Wayland + XWayland、GNOME/Mutter)では `ffmpeg -f x11grab` は
+  ウィンドウ位置・画面原点いずれでも常に黒画面になり使えない。GNOME Shell の
+  D-Bus `org.gnome.Shell.Screenshot.ScreenshotArea` も `AccessDenied` で
+  未署名スクリプトから呼べない。画面キャプチャの自動化は未解決(check-workflow)。
+- `xdotool` によるウィンドウ検索・ジオメトリ取得・キー送信(Escape 等)は機能するが、
+  **マウスクリックの配信は不安定**(`getmouselocation` で狙った座標に一致していても、
+  意図しない行に届く/どこにも届かないことがある。`windowactivate` や `sleep` を
+  挟んでも解消せず)。ボタン/メニュークリックに依存する自動 UI 操作は現状信頼できない。
+  ランチャー経由が必要なければ単発実行モード(`./build/midibox_host <app>.wasm`
+  で直接起動)を使うとメニュークリック自体を回避できる(check-workflow)。
 
 ## 初回セットアップ(ユーザーが一度だけ実施)
 
