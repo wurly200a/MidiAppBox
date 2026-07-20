@@ -167,14 +167,14 @@ docker run -d --name <container> \
 ```
 
 - 生成物は `ffprobe` で h264 / 正常な duration を確認。
-- 動画・音声ずれは調査済み(2026-07-20、check-workflow-routine 後の別タスク。
-  詳細は scripts/cam-rec.sh 冒頭コメントと docs/dev-log.md)。キュー詰まり・
-  入力間の時刻系不一致という構造的な原因は特定し `-thread_queue_size`/
-  `-timestamps abs` で修正済み。それ以外に残る固定オフセットは、周期信号
-  (メトロノームのビート)での見積もりが誤り(符号取り違え)と判明し撤回、
-  この録画アングルでは単発イベントでの再検証もできなかったため**符号・量とも
-  未確定のまま**。今後、映像に単発の視覚マーカーが確実に映る構図が用意できる
-  場合のみ再検証すること。
+- 動画・音声ずれは原因特定・修正済み(2026-07-20、check-workflow-routine 後の
+  別タスク。詳細は scripts/cam-rec.sh 冒頭コメントと docs/dev-log.md)。根本原因は
+  ffmpeg が v4l2/pulse の 2 入力を**それぞれ自分の先頭時刻で 0 にリセット**し、
+  音声が映像より系統的に約164ms 遅れて始まる相対差を破棄していたこと(結果として
+  音声が早く再生される)。pulse 入力に `-itsoffset`(既定 0.16s、環境変数
+  `CAM_AUDIO_DELAY` で調整可)を前置して補正、ユーザーの ffplay 判定で同期を確認。
+  併せて `-thread_queue_size`/`-timestamps abs` も維持(キュー詰まり回避・両入力の
+  時刻系統一)。
 
 ## §4 一巡チェックモード(routine)
 
