@@ -111,7 +111,11 @@ herdr pane list --workspace 1            # 初回のみ: JSON 構造の実物を
 ./scripts/hpane.sh waitfor unix-build "app started" 15000
 
 # 数秒動作させたのち、ESC キー送信で終了(キー送信は信頼できる。クリックは不可)
-xdotool search --name "MidiAppBox WASM host"   # → <window id>
+xdotool search --name "MidiAppBox WASM host"   # → <window id>(複数ヒットすることがある)
+# 複数ヒットした場合は無関係なウィンドウ(mutter-x11-frames 等の装飾ウィンドウが
+# 誤って一致することがある)が混ざっていないか、対象 pid と突き合わせて確認する:
+#   for w in <window id...>; do xdotool getwindowpid $w; done
+#   pgrep -af midibox_host   # ここで得た pid と一致するものを選ぶ
 xdotool key --window <window id> Escape
 
 # 確認
@@ -122,6 +126,12 @@ pgrep -af midibox_host                          # 残留なしを確認(何も�
 ### 3.2 ESP32 実機
 
 ```bash
+# 持続コンテナ(<container>)が無ければ起動する(README のタグ、生イメージ)。
+# `docker ps -a` に README タグの持続コンテナが見当たらない場合のみ実行:
+docker run -d --name <container> \
+  -v <repo>:/workspaces/MidiAppBox -w /workspaces/MidiAppBox \
+  ghcr.io/wurly200a/builder-esp32/esp-idf-v5.5:5.5.5 sleep infinity
+
 # ビルド(README のタグのコンテナ。export.sh を明示 source)
 ./scripts/hpane.sh run esp32-build \
   "docker exec -w /workspaces/MidiAppBox/src <container> bash -c 'source /opt/esp-idf/export.sh && idf.py build'" 1800000

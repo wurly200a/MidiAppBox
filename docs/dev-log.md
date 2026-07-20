@@ -940,3 +940,17 @@ image header(2048k). Using the size in the binary image header.` が出ていた
 検証エビデンス: `captures/check-workflow-routine/cam_rec_121459.mp4`、
 `captures/check-workflow-routine/cam_still_121558.png`(いずれも `.gitignore`
 対象、リポジトリには含まれない)。
+
+## 改善案の反映 (2026-07-20)
+
+上記「手順の改善案」2 件について、ユーザー承認を得て docs/workflow.md §5 の
+手続きに従い反映した(スクリプト・herdr レイアウトの変更は伴わない、
+ドキュメントのみの更新):
+
+- **docs/workflow.md §3.2**: 持続コンテナ (`<container>`) が存在しない場合の
+  起動コマンド(`docker run -d --name <container> ... sleep infinity`)を
+  ビルド手順の先頭に追記。
+- **docs/workflow.md §3.1**: `xdotool search` が複数ウィンドウ ID を返した
+  場合に `getwindowpid`/`pgrep -af midibox_host` で対象を照合する手順を追記。
+- **CLAUDE.md 教訓チェックリスト**: 上記 2 点をそれぞれ「herdr / ビルド」
+  「Linux ホスト(SDL / GUI 自動化)」節に一行追加。

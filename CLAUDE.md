@@ -132,6 +132,10 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
   保護的に停止した場合、削除前に該当ファイルの差分を確認すること
   (check-workflow で、ローカル修正が入っていた可能性のあるファイルを不用意に
   削除してしまった)。
+- README タグの生イメージによる持続コンテナ(`esp32-build` 用)は自動では
+  存在しない。`docker ps -a` で見当たらなければ `docker run -d --name <container>
+  -v <repo>:/workspaces/MidiAppBox -w /workspaces/MidiAppBox <README タグ>
+  sleep infinity` で起動してから `docker exec` する(check-workflow-routine)。
 
 ### Linux ホスト(SDL / GUI 自動化)
 - この開発環境(Wayland + XWayland、GNOME/Mutter)では `ffmpeg -f x11grab` は
@@ -144,6 +148,11 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
   挟んでも解消せず)。ボタン/メニュークリックに依存する自動 UI 操作は現状信頼できない。
   ランチャー経由が必要なければ単発実行モード(`./build/midibox_host <app>.wasm`
   で直接起動)を使うとメニュークリック自体を回避できる(check-workflow)。
+- `xdotool search --name "MidiAppBox WASM host"` は複数のウィンドウ ID を返す
+  ことがあり、うち `mutter-x11-frames` の装飾ウィンドウが無関係に混入する
+  ケースを確認。`xdotool getwindowpid <id>` と `pgrep -af midibox_host` の
+  pid を突き合わせて対象ウィンドウを特定してから `key`/`Escape` を送ること
+  (check-workflow-routine)。
 
 # 依存の記録
 
