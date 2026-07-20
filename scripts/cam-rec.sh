@@ -7,15 +7,19 @@
 #   - v4l2 は既定でカーネル(モノトニック)由来のタイムスタンプ、pulse は既定で
 #     壁時計由来のタイムスタンプと、入力ごとに時刻系が異なっていたため v4l2 側を
 #     -timestamps abs に統一。
-#   - 上記修正後もメトロノームの点滅(映像)とクリック音(音声)を突き合わせて
-#     実測したところ、音声が映像よりおよそ150〜210ms 遅れる一定オフセットが
-#     修正前後で変わらず残った。低照度対策の固定露光(exposure_time_absolute=451
-#     ≒45ms/フレーム)+ USB MJPEG の読み出し・デコード遅延に由来するカメラ
-#     ハードウェア側の構造的遅延と推定し、-itsoffset -0.2 で音声を約200ms
-#     前倒しする対症療法を追加、実測でオフセットを約210ms→約10msまで低減
-#     できることを確認した。
-#   - 200ms は本機(Logitech StreamCam)・この露光設定での経験値であり、
-#     機種や exposure_time_absolute を変えた場合はズレ量も変わりうる点に注意
+#   - 上記修正後、メトロノームの点滅(映像)とクリック音(音声)という「0.5秒
+#     周期の信号」を最近傍マッチングで突き合わせて -itsoffset による補正量を
+#     見積もったが、これは誤りだった。周期信号同士の最近傍マッチングは真の
+#     ズレが半周期(250ms)を超えると符号を取り違える(300ms遅れ ≡ -200ms ≡
+#     +200ms mod 500ms)ため、実際に -itsoffset -0.2 を組み込んで ffplay で
+#     再生確認したところ「むしろ逆にずれた」というユーザー報告により誤りが
+#     判明した。この対症療法は撤回済み。
+#   - 周期性のない単発イベント(拍手・画面ボタンタップ)での再検証も試みたが、
+#     この録画アングル(ESP32 本体に固定)では手が画角に入らず、ボタン側にも
+#     押下時の視覚変化がないため、映像側の基準時刻を特定できなかった。
+#     このため固定オフセットの符号・量は**未確定のまま**とし、根拠のない
+#     -itsoffset は追加しないことで確定(ユーザー承認済み、2026-07-20)。
+#     再検証するなら、手や既知の視覚マーカーが確実に画角に入る構図が必要
 #     (詳細は docs/dev-log.md)。
 #
 # 使い方: scripts/cam-rec.sh [出力先ディレクトリ]  (省略時 captures/check-workflow/)
@@ -43,7 +47,7 @@ apply_settings() {
 ffmpeg -nostdin -loglevel warning \
        -f v4l2 -thread_queue_size 1024 -timestamps abs \
          -input_format mjpeg -video_size 1280x720 -framerate 30 -i "$DEV" \
-       -itsoffset -0.2 -f pulse -thread_queue_size 1024 -i default \
+       -f pulse -thread_queue_size 1024 -i default \
        -c:v libx264 -preset fast -crf 20 -pix_fmt yuv420p -c:a aac \
        -movflags +faststart "$OUT" &
 FFPID=$!
