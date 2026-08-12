@@ -28,6 +28,7 @@
 
 #include "font8x8_basic.h"
 #include "hostapi_defs.h"
+#include "hostapi_midi.h"
 
 /* 実機と同じランドスケープ 320x240 */
 #define SCREEN_W 320
@@ -192,6 +193,7 @@ static void audio_callback(void* userdata, Uint8* stream, int len)
             s_click_last_fired = s_click_pending;
             s_click_pending = 0;
             click_record_fire(target);
+            host_midi_notify_beat_fired(s_click_last_fired); /* Phase 8b */
         }
     }
 
@@ -301,6 +303,7 @@ void host_sdl_audio_reset(void)
         s_tones[0] = kDefaultClick; /* slot 0 = v0 互換の既定クリック */
         SDL_UnlockAudioDevice(s_audio);
     }
+    host_midi_reset(); /* MIDI Clock 生成も必ず停止する (Phase 8b 契約) */
 }
 
 /* ミュージックルート相対パスの検証(実機側 hostapi.cpp と同じ規則) */
@@ -798,6 +801,9 @@ static int32_t tone_schedule_impl(int32_t slot, int32_t time_ms)
     ToneDef tone;
     if (!tone_lookup(slot, &tone)) return -1;
 
+    bool scheduled = false;
+    bool fire_old = false;
+    uint32_t last_fired_snapshot = 0;
     SDL_LockAudioDevice(s_audio);
     if (t > s_click_last_fired) {
         /* 置き換えガード: 期限到来済みの未発火予約を破棄しない。
@@ -807,11 +813,23 @@ static int32_t tone_schedule_impl(int32_t slot, int32_t time_ms)
             s_click_last_fired = s_click_pending;
             s_asap_tone = s_pending_tone;
             s_click_asap = true;
+            fire_old = true;
         }
         s_click_pending = t; /* 置き換え予約(last_fired 以前は無視) */
         s_pending_tone = tone; /* 予約時スナップショット */
+        scheduled = true;
+        last_fired_snapshot = s_click_last_fired;
     }
     SDL_UnlockAudioDevice(s_audio);
+    if (scheduled) {
+        /* Phase 8b: 新しい予約(t)が確定した時点でテンポを staging する。
+         * fire_old で旧予約を発音扱いにする場合は、その通知より先に行う
+         * (旧拍の発音通知が最新テンポを picks up できるように)。 */
+        host_midi_notify_beat_scheduled(t);
+        if (fire_old) {
+            host_midi_notify_beat_fired(last_fired_snapshot);
+        }
+    }
     return 0;
 }
 

@@ -40,8 +40,15 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
   UM-ONE LED 点灯・`aseqdump` で Note On/Off 正常受信を確認。検証専用コードは
   確認後に削除済み(Host API/ABI 変更なし)。詳細・トラブルは docs/dev-log.md
   の Phase 8a 節。
-- 次の候補: Phase 8 本体(`hostapi_midi_send` の Host API 実装)がスコープ候補
-  だが着手はユーザー指示待ち。
+- Phase 8b(docs/prompts/phase08b_midi_clock_api.md、MIDI Clock 出力 Host API)
+  完了。`hostapi_midi_send` を追加し、メトロノームの START/STOP に MIDI
+  Start/Stop を相乗り、host 内部で 24ppqn クロックを生成(実機 UART1・Linux
+  は ALSA シーケンサ経由で UM-ONE へ実送信)。テンポ変更時にクロックが暴走する
+  不具合を実機検証で発見し、テンポ導出ロジックを「直前発音時刻」基準から
+  「直前に受け取った予約時刻」基準に設計変更して解消。詳細は docs/dev-log.md
+  の Phase 8b 節。
+- 次の候補: MIDI IN(TLP2361)側の検証・実装、Song Position Pointer 等の
+  高度な MIDI 同期はスコープ外として持ち越し。着手はユーザー指示待ち。
 
 ## 開発の進め方(このリポジトリでの作業ルール)
 
@@ -174,6 +181,12 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
   ケースを確認。`xdotool getwindowpid <id>` と `pgrep -af midibox_host` の
   pid を突き合わせて対象ウィンドウを特定してから `key`/`Escape` を送ること
   (check-workflow-routine)。
+- herdr の pane に `send-keys` で "Escape" を送っても `midibox_host`
+  (SDL アプリ)は終了しない(ターミナルではなく SDL ウィンドウがフォーカスを
+  持つため、キー入力はそちらに届く)。プロセスを止めるには
+  `herdr pane send-keys <pane_id> "C-c"` でそのペインの前面プロセスへ
+  SIGINT を送ること。放置すると同じペインへの後続コマンドが軒並み
+  タイムアウトする(8b)。
 
 # 依存の記録
 
@@ -183,6 +196,7 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
 | (Linux) WAMR vmlib, SDL2 | Phase 3 | Linux ホスト用。実機と同一ランタイムで API 登録コードを共有するため |
 | (Linux) SDL2_ttf(任意) | Phase 5 後 | 実機(LVGL の AA フォント)に見た目を合わせるため。無ければ font8x8 にフォールバックするので必須依存ではない |
 | (Linux) SDL2_mixer(任意) | Phase 6B | MP3 再生。対案 mpg123 直叩きはデコード後の PCM 出力経路(デバイス管理・ミキシング)を自作する必要があるのに対し、SDL_mixer は pause/resume/volume/終了フック(Mix_HookMusicFinished)が hostapi_audio_* の状態機械に 1:1 で対応し、既存 SDL2 と同居できる。無ければ audio_play が常に ERROR を返すビルドになる(必須依存ではない) |
+| (Linux) ALSA(libasound、任意) | Phase 8b | MIDI OUT(hostapi_midi_send)の実送信。Linux ホストには実 MIDI ポートがないため、ALSA シーケンサ(snd_seq)経由で実機同等の外部 MIDI 機器(UM-ONE 等)へ直接送信できるようにした(ユーザーが Phase 8a で UM-ONE の動作確認環境を Linux ホストに用意していたため採用)。無ければ送信バイト列を stderr にログ出力するだけのフォールバックで動作する(必須依存ではない) |
 
 # ビルドメモ
 

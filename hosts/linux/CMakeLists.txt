@@ -58,13 +58,37 @@ if(NOT SDL2_mixer_FOUND)
     endif()
 endif()
 
+# ---- ALSA(任意。Phase 8b: MIDI OUT を実ポート(例: UM-ONE)へ送信する。
+# 無ければ hostapi_midi_send は送信バイト列を stderr にログ出力するのみ) ----
+find_package(ALSA QUIET)
+if(NOT ALSA_FOUND)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(ALSA_PC QUIET alsa)
+    endif()
+endif()
+
 # ---- host executable ----
-add_executable(midibox_host main.c hostapi_sdl.c)
+add_executable(midibox_host main.c hostapi_sdl.c hostapi_midi.c)
 target_include_directories(midibox_host PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../../shared
 )
 target_link_libraries(midibox_host PRIVATE vmlib SDL2::SDL2)
+
+if(ALSA_FOUND)
+    target_compile_definitions(midibox_host PRIVATE HAVE_ALSA)
+    target_include_directories(midibox_host PRIVATE ${ALSA_INCLUDE_DIRS})
+    target_link_libraries(midibox_host PRIVATE ${ALSA_LIBRARIES})
+    message(STATUS "ALSA: found (MIDI OUT sent via ALSA sequencer)")
+elseif(ALSA_PC_FOUND)
+    target_compile_definitions(midibox_host PRIVATE HAVE_ALSA)
+    target_include_directories(midibox_host PRIVATE ${ALSA_PC_INCLUDE_DIRS})
+    target_link_libraries(midibox_host PRIVATE ${ALSA_PC_LIBRARIES})
+    message(STATUS "ALSA: found via pkg-config (MIDI OUT sent via ALSA sequencer)")
+else()
+    message(STATUS "ALSA: not found (hostapi_midi_send will log to stderr only)")
+endif()
 
 if(SDL2_ttf_FOUND)
     target_compile_definitions(midibox_host PRIVATE HAVE_SDL_TTF)

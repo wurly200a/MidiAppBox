@@ -10,6 +10,7 @@
 #include "display.hpp"
 #include "touch.hpp"
 #include "audio.hpp"
+#include "midi.hpp"
 #include "wasm_runtime.hpp"
 #include "hostapi.hpp"
 #include "launcher.hpp"
@@ -49,6 +50,9 @@ extern "C" void app_main()
     ESP_LOGI(TAG, "Audio_Init: free heap %u -> %u (delta %d)",
              (unsigned)heap_before_audio, (unsigned)esp_get_free_heap_size(),
              (int)(heap_before_audio - esp_get_free_heap_size()));
+
+    // MIDI OUT の常設初期化(Phase 8a で確認済みの UART1 設定。起動時1回のみ)
+    midi::Midi_Init();
 
     if (!wasmrt::runtime_init()) {
         ESP_LOGE(TAG, "WASM runtime init failed");

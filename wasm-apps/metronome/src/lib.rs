@@ -8,6 +8,8 @@
 // Phase 7D: テンポ 1 刻み(-1/+1 ボタン、既存 BPM±5 と長押し連打加速を追加)、
 // ボリューム調整(V-/V+、hostapi_audio_set_volume によるマスター音量)を追加。
 // いずれも既存 Host API のみで完結(API/ABI 変更なし)。
+// Phase 8b: START/STOP に MIDI Clock の Start(0xFA)/Stop(0xFC)を相乗り。
+// テンポ伝達は行わない(host が既存のクリック予約の間隔から自動導出する)。
 // ホスト API (module "env") のみ使用。no_std / アロケータ不要。
 #![no_std]
 
@@ -25,7 +27,12 @@ extern "C" {
     fn hostapi_tone_define(slot: i32, wave: i32, freq_hz: i32, dur_ms: i32, level: i32) -> i32;
     fn hostapi_tone_schedule(slot: i32, time_ms: i32) -> i32;
     fn hostapi_audio_set_volume(v: i32);
+    fn hostapi_midi_send(bytes: *const u8, len: u32) -> i32;
 }
+
+// MIDI System Realtime(単独1バイト送信で host 側のクロック生成をトリガする)
+const MIDI_START: [u8; 1] = [0xFA];
+const MIDI_STOP: [u8; 1] = [0xFC];
 
 // アクセント音のスロット(1 拍目用)。slot 0 は既定クリック(通常拍)のまま
 const ACCENT_SLOT: i32 = 1;
@@ -334,8 +341,10 @@ fn handle_tap(x: i16, y: i16) {
                         RUNNING = !RUNNING;
                         if RUNNING {
                             rearm(now);
+                            hostapi_midi_send(MIDI_START.as_ptr(), 1);
                         } else {
                             hostapi_click_schedule(0); // キャンセル
+                            hostapi_midi_send(MIDI_STOP.as_ptr(), 1);
                             draw_lamps(usize::MAX);
                         }
                         draw_run_button();

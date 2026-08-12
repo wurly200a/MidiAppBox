@@ -31,6 +31,11 @@ static constexpr gpio_num_t LCD_PIN_BL   = PIN_LCD_BL;
 // --- Power Key ---
 static constexpr gpio_num_t PIN_PWR_KEY   = GPIO_NUM_0;  // e.g., equivalent to BOOT button
 
+// --- MIDI OUT (自作回路, Phase 8a で疎通確認済み) ---
+// UART1 TX。2SC1815 トランジスタドライブ、31250bps 8N1、論理反転あり
+// (uart_set_line_inverse(UART_NUM_1, UART_SIGNAL_TXD_INV) が必須)。
+static constexpr gpio_num_t PIN_MIDI_TX = GPIO_NUM_18;
+
 // --- LCD parameters ---
 static constexpr int LCD_H_RES = 240;
 static constexpr int LCD_V_RES = 320;

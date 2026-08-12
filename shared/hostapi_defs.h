@@ -104,6 +104,8 @@
  *   hostapi_click_schedule(t)     ≡ hostapi_tone_schedule(0, t)
  *     (v0/7A 互換。slot 0 を再定義すればこれらの音も変わる)
  *
+ * ============================== misc ==============================
+ *
  *   hostapi_click_schedule(time_ms) -> 0/-1  (Phase 7A, v2)
  *     time_ms(hostapi_now_ms() と同一時基)にクリック音を発音するよう予約する。
  *     tick 格子(100ms)より細かいタイミング精度が要る発音のための API
@@ -117,6 +119,27 @@
  *     - now を過ぎた時刻(ただし last_fired より後)の予約は可及的速やかに発音。
  *     - アプリ破棄時、ホストは予約と last_fired をリセットする。
  *     - v2 では MP3 再生中の予約発音の精度は保証しない(クリックと MP3 は排他前提)。
+ *
+ * ============================== midi ==============================
+ *
+ *   hostapi_midi_send(bytes_ptr, bytes_len) -> 0/-1  (Phase 8b)
+ *     MIDI バイト列をそのまま MIDI OUT へ送信する(App drives API: App は
+ *     素の MIDI バイト列を渡すだけで、ホストはその意味を強制しない)。
+ *     bytes_len は 1..8(範囲外は -1)。MIDI OUT 未初期化でも -1。
+ *
+ *     ただし System Realtime の Start(0xFA)/Continue(0xFB)/Stop(0xFC) を
+ *     **単独の1バイトメッセージ**として送ると、ホストはそれをトリガに
+ *     内部で 24ppqn の MIDI Clock(0xF8)の生成を開始/停止する。
+ *     - クロック生成は app_tick に一切依存しない、host 内部のタイマ駆動。
+ *     - テンポは新規に App から伝達しない。既存のクリック/トーン予約
+ *       (hostapi_tone_schedule 系, 上記)が毎拍再予約される際の「直前に
+ *       発音した時刻」と「次に予約された時刻」の差分から host が導出する。
+ *       そのため MIDI Clock は「クリック音を発音している拍の間隔」に
+ *       自動的に追従する(二重にテンポを持たない)。
+ *     - アプリ破棄時、ホストは MIDI Clock 生成を必ず停止する
+ *       (クリック予約のリセットと同じタイミング)。
+ *     - Song Position Pointer 等、Continue を位置復帰として使う高度な
+ *       同期はスコープ外(v1 では Continue は Start と同じ扱い)。
  */
 #pragma once
 
@@ -183,7 +206,9 @@ enum {
     X(hostapi_click_schedule, "(i)i")     \
     X(hostapi_tone_define, "(iiiii)i")    \
     X(hostapi_tone_play, "(i)i")          \
-    X(hostapi_tone_schedule, "(ii)i")
+    X(hostapi_tone_schedule, "(ii)i")     \
+    /* midi (Phase 8b) */                 \
+    X(hostapi_midi_send, "(*~)i")
 
 /* NativeSymbol 配列の初期化子を生成するヘルパ */
 #define HOSTAPI_SYMBOL_ENTRY(name, sig) { #name, (void*)native_##name, sig, NULL },

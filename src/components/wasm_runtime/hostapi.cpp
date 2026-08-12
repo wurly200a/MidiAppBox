@@ -12,6 +12,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "audio.hpp"
+#include "midi.hpp"
 #include "freertos/FreeRTOS.h"
 
 #include <atomic>
@@ -253,6 +254,7 @@ void click_timer_cb(void*)
     if (t != 0) {
         click_record_fire();
         audio::Play_Tone(tone.freq_hz, tone.dur_ms, tone.level);
+        midi::Midi_NotifyBeatFired(t); // Phase 8b: 24ppqn クロックの位相再同期
     }
 }
 
@@ -321,10 +323,16 @@ int32_t tone_schedule_impl(int32_t slot, int32_t time_ms)
     }
     s_click_pending = t; // 置き換え(トーンは予約時スナップショット)
     s_pending_tone = tone;
+    const uint32_t last_fired_snapshot = s_click_last_fired;
     portEXIT_CRITICAL(&s_click_mux);
+    // Phase 8b: 新しい予約(t)が確定した時点でテンポを staging する。
+    // fire_old で旧予約を発音扱いにする場合は、その通知より先に行う
+    // (旧拍の発音通知が picks up できるよう、先に最新テンポを渡しておく)。
+    midi::Midi_NotifyBeatScheduled(t);
     if (fire_old) {
         click_record_fire();
         audio::Play_Tone(old_tone.freq_hz, old_tone.dur_ms, old_tone.level);
+        midi::Midi_NotifyBeatFired(last_fired_snapshot);
     }
 
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
@@ -381,6 +389,14 @@ int32_t native_hostapi_tone_schedule(wasm_exec_env_t exec_env, int32_t slot,
 {
     (void)exec_env;
     return tone_schedule_impl(slot, time_ms);
+}
+
+// ---- MIDI (Phase 8b) ----
+// buf は WAMR 境界検証済み(シグネチャ "*~")。実装は midi:: に委譲する。
+int32_t native_hostapi_midi_send(wasm_exec_env_t exec_env, const char* bytes, uint32_t len)
+{
+    (void)exec_env;
+    return midi::Midi_Send(reinterpret_cast<const uint8_t*>(bytes), len);
 }
 
 uint32_t native_hostapi_now_ms(wasm_exec_env_t exec_env)
@@ -594,6 +610,7 @@ void hostapi_audio_reset()
     portEXIT_CRITICAL(&s_click_mux);
     tone_table_reset(); // トーンパレットも初期状態へ (Phase 7C 契約)
     audio::Volume_adjustment(98);
+    midi::Midi_Reset(); // MIDI Clock 生成も必ず停止する (Phase 8b 契約)
 }
 
 bool hostapi_register_natives()
