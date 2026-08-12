@@ -22,7 +22,7 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
 - ユーザーとのやりとり(会話・報告・質問)は日本語。
 - git のコミットメッセージは英語。
 
-## 現在地 (2026-07-20 時点)
+## 現在地 (2026-08-12 時点)
 
 - check-workflow(docs/prompts/check-workflow.md)完了。herdr ペイン運用を
   「ラベルごとに別タブ」から「**共有タブ1つに3列×2行で分割配置**」に変更
@@ -35,7 +35,13 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
 - Phase 7(7A 予約発音 / 7B メトロノーム / 7B-fix DMA 二重クリック / 7C トーンパレット /
   7D テンポ1刻み・ボリューム調整)完了。詳細は docs/dev-log.md の Phase 7 節。
 - Zenn 連載: 第 1〜7 回公開済み、第 8〜17 回はスケジュール公開設定済み(〜2026-07-28、詳細は docs/zenn.md)。
-- 次の候補: 未定(Phase 8 のスコープはユーザー指示待ち)。
+- Phase 8a(docs/prompts/phase08a_midi_out_bringup.md、MIDI OUT 疎通確認)完了。
+  自作 MIDI OUT 回路(GPIO18=UART1 TX、2SC1815)を UM-ONE 経由で確認、
+  UM-ONE LED 点灯・`aseqdump` で Note On/Off 正常受信を確認。検証専用コードは
+  確認後に削除済み(Host API/ABI 変更なし)。詳細・トラブルは docs/dev-log.md
+  の Phase 8a 節。
+- 次の候補: Phase 8 本体(`hostapi_midi_send` の Host API 実装)がスコープ候補
+  だが着手はユーザー指示待ち。
 
 ## 開発の進め方(このリポジトリでの作業ルール)
 
@@ -99,6 +105,10 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
 - SD シード後に magic 不一致が続いたら SD 側の FS 破損を疑う(手動コピー / 再フォーマット)(7A)。
 - monitor 再起動は既定でボードをリセットする。`--no-reset` は `-p <port>` 指定必須(7A)。
 - monitor は `PYTHONUNBUFFERED=1 ... | tee <ログ>` で落とし、ホスト側ファイルポーリングで読む(7A)。
+- IDF 5.5 のレガシー UART ドライバは TX-only 構成でも `uart_driver_install` の
+  `rx_buffer_size=0` を受け付けない(`uart rx buffer length error` →
+  `ESP_ERROR_CHECK` で abort・パニックリブート)。RX を使わなくても
+  `UART_HW_FIFO_LEN` 超の小さなバッファ(例: 256)を明示確保すること(8a)。
 
 ### herdr / ビルド
 - 完了待ちは hpane.sh の番兵方式のみ。ログ文言への `wait output` 直マッチは
@@ -136,6 +146,17 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
   存在しない。`docker ps -a` で見当たらなければ `docker run -d --name <container>
   -v <repo>:/workspaces/MidiAppBox -w /workspaces/MidiAppBox <README タグ>
   sleep infinity` で起動してから `docker exec` する(check-workflow-routine)。
+- README タグの生イメージの `entrypoint.sh` は起動時カレントディレクトリ
+  (`-w` の値)の所有者に UID/GID を合わせて `gosu` で降格してからコマンドを
+  実行する。`docker run`(entrypoint 経由)はこれでホスト UID になるが、
+  `docker exec` はこれを経由せずイメージ既定ユーザー(root)で実行される。
+  同一の持続コンテナに対して `exec`(root)と都度起動の `run --rm`(gosu
+  降格後 UID)を混在させると、`build.ninja`/`.ninja_log` 等の所有者が割れて
+  以後のビルドが `Permission denied` で失敗する。ビルド・フラッシュ・
+  モニタは同じ実行方式(`docker run --rm`)に統一するのが安全(8a)。
+- `scripts/hpane.sh send` はテキスト入力のみで割り込みキーは送れない。
+  `idf.py monitor` 等を止めるには `herdr pane send-keys <pane_id> "C-c"`
+  を使う(`"C-]"` のような角括弧付きキー名は `invalid_key` で拒否される)(8a)。
 
 ### Linux ホスト(SDL / GUI 自動化)
 - この開発環境(Wayland + XWayland、GNOME/Mutter)では `ffmpeg -f x11grab` は
