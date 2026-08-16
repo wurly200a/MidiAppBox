@@ -82,8 +82,7 @@
 
 ## §3 推奨手順(既定の具体的なやり方)
 
-以下は check-workflow / 7D で実績のあるコマンド列。`<repo>` はリポジトリの
-絶対パス、`<container>` は README のタグで起動した持続コンテナ名/ID に読み替える。
+以下は check-workflow / 7D / 8c で実績のあるコマンド列。`<repo>` はリポジトリの絶対パス。
 
 ### 3.0 環境確認
 
@@ -125,28 +124,45 @@ pgrep -af midibox_host                          # 残留なしを確認(何も�
 
 ### 3.2 ESP32 実機
 
+**`docker run --rm`(都度起動)に統一する。** 持続コンテナ + `docker exec`
+方式は、`entrypoint.sh` の gosu 降格(`docker run`)を経由しない `exec`
+(root 実行)と混在すると `build.ninja`/`.ninja_log` 等の所有者が割れて
+`Permission denied` を起こす実績があるため使わない(詳細は CLAUDE.md
+教訓チェックリスト・docs/dev-log.md Phase 8a)。ビルド・フラッシュ・モニタ
+すべてこの方式で統一する。
+
 ```bash
-# 持続コンテナ(<container>)が無ければ起動する(README のタグ、生イメージ)。
-# `docker ps -a` に README タグの持続コンテナが見当たらない場合のみ実行:
-docker run -d --name <container> \
-  -v <repo>:/workspaces/MidiAppBox -w /workspaces/MidiAppBox \
-  ghcr.io/wurly200a/builder-esp32/esp-idf-v5.5:5.5.5 sleep infinity
-
-# ビルド(README のタグのコンテナ。export.sh を明示 source)
+# ビルド(README のタグの生イメージを都度起動。export.sh を明示 source)
 ./scripts/hpane.sh run esp32-build \
-  "docker exec -w /workspaces/MidiAppBox/src <container> bash -c 'source /opt/esp-idf/export.sh && idf.py build'" 1800000
+  "docker run --rm -v <repo>:/workspaces/MidiAppBox -w /workspaces/MidiAppBox/src \
+   ghcr.io/wurly200a/builder-esp32/esp-idf-v5.5:5.5.5 \
+   bash -c 'source /opt/esp-idf/export.sh && idf.py build'" 1800000
 
-# フラッシュ(コンテナに /dev/ttyACM0 が渡っていること。
-# 渡っていない場合は --device=/dev/ttyACM0 --group-add <dialout gid> を付けた
-# docker run --rm -it を都度起動する。monitor 同様 -it 必須)
+# フラッシュ(--device=/dev/ttyACM0 --group-add <dialout gid> を付けた
+# docker run --rm -it を都度起動。monitor 同様 -it 必須)
 ./scripts/hpane.sh run esp32-build \
-  "docker exec -w /workspaces/MidiAppBox/src <container> bash -c 'source /opt/esp-idf/export.sh && idf.py -p /dev/ttyACM0 flash'" 300000
+  "docker run --rm -it -v <repo>:/workspaces/MidiAppBox -w /workspaces/MidiAppBox/src \
+   --device=/dev/ttyACM0 --group-add <dialout gid> \
+   ghcr.io/wurly200a/builder-esp32/esp-idf-v5.5:5.5.5 \
+   bash -c 'source /opt/esp-idf/export.sh && idf.py -p /dev/ttyACM0 flash'" 300000
 
-# モニタ(常駐: send + waitfor + tee)
+# モニタ(常駐: send + waitfor + tee)。ログはマウント配下(ホスト側 captures/
+# 等)に出す。コンテナ内一時パス(/tmp 等)は --rm で消え、herdr の
+# スクロールバックも高頻度ログですぐ埋まるため、ホスト側ファイルで確認する。
 ./scripts/hpane.sh send esp32-monitor \
-  "docker exec -w /workspaces/MidiAppBox/src <container> bash -c 'source /opt/esp-idf/export.sh && PYTHONUNBUFFERED=1 idf.py -p /dev/ttyACM0 monitor | tee /tmp/monitor.log'"
+  "docker run --rm -it -v <repo>:/workspaces/MidiAppBox -w /workspaces/MidiAppBox/src \
+   --device=/dev/ttyACM0 --group-add <dialout gid> \
+   ghcr.io/wurly200a/builder-esp32/esp-idf-v5.5:5.5.5 \
+   bash -c 'source /opt/esp-idf/export.sh && PYTHONUNBUFFERED=1 idf.py -p /dev/ttyACM0 monitor | tee /workspaces/MidiAppBox/captures/<タスク名>/monitor.log'"
 ./scripts/hpane.sh waitfor esp32-monitor "app_main" 60000
 ```
+
+長時間接続した `idf.py monitor` は `docker ps` 上 `Up` のままサイレントに
+詰まる(実機からの新規出力を転送しなくなる)ことがある。実機自体は動作を
+続けているため、`docker kill <container id>` で該当コンテナを落として
+モニタを再起動すれば復旧する。`herdr pane send-keys <pane_id> "C-c"` は
+効かないことがあるので、`docker ps` で確認して直接 kill する方が確実
+(詳細は CLAUDE.md 教訓チェックリスト・docs/dev-log.md Phase 8c)。
 
 ### 3.3 実機の動作検証(カメラ+人間操作)
 
