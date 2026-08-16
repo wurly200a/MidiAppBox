@@ -36,6 +36,13 @@ static constexpr gpio_num_t PIN_PWR_KEY   = GPIO_NUM_0;  // e.g., equivalent to 
 // (uart_set_line_inverse(UART_NUM_1, UART_SIGNAL_TXD_INV) が必須)。
 static constexpr gpio_num_t PIN_MIDI_TX = GPIO_NUM_18;
 
+// --- MIDI IN (TLP2361 フォトカプラ受信回路, Phase 8c で検証) ---
+// UART1 RX。DIN5 → 220Ω → TLP2361(1N4148 逆並列)→ VO を直結。
+// TLP2361 はトーテムポール出力かつ反転型で、MIDI のカレントループ論理
+// (アイドル = 無電流 = 出力 H)がそのまま UART の論理レベルに一致するため、
+// RXD 側の反転(UART_SIGNAL_RXD_INV)は不要(TXD 側のみ反転させる)。
+static constexpr gpio_num_t PIN_MIDI_RX = GPIO_NUM_15;
+
 // --- LCD parameters ---
 static constexpr int LCD_H_RES = 240;
 static constexpr int LCD_V_RES = 320;

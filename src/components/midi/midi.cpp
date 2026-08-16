@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include <cstring>
 
@@ -17,6 +18,11 @@ constexpr uart_port_t kMidiUart = UART_NUM_1;
 constexpr size_t kMaxMsgLen = 8;
 constexpr uint32_t kClockPpqn = 24;
 constexpr uint64_t kMinClockIntervalUs = 500; // 安全弁(異常値での高頻度化を防ぐ)
+
+// ---- MIDI IN 受信バイトダンプ(Phase 8c、検証専用。パースは行わない) ----
+constexpr int kRxBufSize = 1024;    // SysEx を考慮したリングバッファ(指示書どおり)
+constexpr int kRxQueueLen = 16;
+QueueHandle_t s_rx_event_queue = nullptr;
 
 bool s_uart_ready = false;
 
@@ -52,6 +58,47 @@ void clock_timer_stop()
     if (s_clock_timer) esp_timer_stop(s_clock_timer);
 }
 
+// MIDI IN 受信ダンプタスク(Phase 8c 検証専用)。UART イベントキューを
+// 監視し、UART_DATA は受信バイトを 1 バイト 1 行の 16 進+タイムスタンプで
+// ログ出力、それ以外(オーバーラン/フレーミングエラー等)はイベント種別を
+// ログ出力する。パースは一切行わない。
+void rx_dump_task(void*)
+{
+    uart_event_t event;
+    static uint8_t buf[kRxBufSize]; // タスク専用、スタックを圧迫しないよう static
+    for (;;) {
+        if (xQueueReceive(s_rx_event_queue, &event, portMAX_DELAY) != pdTRUE) continue;
+        switch (event.type) {
+        case UART_DATA: {
+            int n = uart_read_bytes(kMidiUart, buf, event.size, 0);
+            const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+            for (int i = 0; i < n; ++i) {
+                ESP_LOGI(TAG, "MIDI RX: %02X t=%u", buf[i], (unsigned)now_ms);
+            }
+            break;
+        }
+        case UART_FIFO_OVF:
+            ESP_LOGW(TAG, "MIDI RX: FIFO overflow");
+            uart_flush_input(kMidiUart);
+            xQueueReset(s_rx_event_queue);
+            break;
+        case UART_BUFFER_FULL:
+            ESP_LOGW(TAG, "MIDI RX: ring buffer full");
+            uart_flush_input(kMidiUart);
+            xQueueReset(s_rx_event_queue);
+            break;
+        case UART_FRAME_ERR:
+            ESP_LOGW(TAG, "MIDI RX: framing error");
+            break;
+        case UART_PARITY_ERR:
+            ESP_LOGW(TAG, "MIDI RX: parity error");
+            break;
+        default:
+            break;
+        }
+    }
+}
+
 } // namespace
 
 void Midi_Init()
@@ -67,18 +114,25 @@ void Midi_Init()
     };
     esp_err_t err = uart_param_config(kMidiUart, &cfg);
     if (err == ESP_OK) {
-        err = uart_set_pin(kMidiUart, PIN_MIDI_TX, UART_PIN_NO_CHANGE,
+        err = uart_set_pin(kMidiUart, PIN_MIDI_TX, PIN_MIDI_RX,
                             UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     }
     if (err == ESP_OK) {
-        // rx_buffer_size=0 は IDF 5.5 のレガシー UART ドライバでは
-        // "uart rx buffer length error" で拒否される(Phase 8a で確認済み)。
-        // RX は使わないが最小限のバッファを確保する。
-        err = uart_driver_install(kMidiUart, /*rx_buffer_size=*/256,
-                                   /*tx_buffer_size=*/0, 0, nullptr, 0);
+        // rx_buffer_size は SysEx を考慮し 1024(Phase 8c 指示書どおり)。
+        // event queue はオーバーラン/フレーミングエラー検知に使う
+        // (Phase 8c、rx_dump_task が消費する)。
+        err = uart_driver_install(kMidiUart, /*rx_buffer_size=*/kRxBufSize,
+                                   /*tx_buffer_size=*/0, kRxQueueLen,
+                                   &s_rx_event_queue, 0);
     }
     if (err == ESP_OK) {
-        // MIDI は論理反転信号(Phase 8a で確認済み)。
+        // MIDI は TX 側のみ論理反転信号(Phase 8a で確認済み)。RX 側は
+        // TLP2361 がトーテムポール出力かつ反転型で、MIDI のカレントループ
+        // 論理(アイドル = 無電流 = 出力 H)がそのまま UART の論理レベルに
+        // 一致するため UART_SIGNAL_RXD_INV は付けない(board_pins.hpp 参照、
+        // Phase 8c 指示書の必須確認事項)。実機検証で RXD_INV ありでも同じ
+        // ノイズパターンが再現することを確認済み(反転設定が原因ではないと
+        // 実証済み、docs/dev-log.md Phase 8c 参照)。
         err = uart_set_line_inverse(kMidiUart, UART_SIGNAL_TXD_INV);
     }
     if (err != ESP_OK) {
@@ -88,6 +142,9 @@ void Midi_Init()
     clock_timer_ensure();
     s_uart_ready = true;
     ESP_LOGI(TAG, "MIDI OUT ready (GPIO%d, 31250bps, TXD inverted)", (int)PIN_MIDI_TX);
+
+    xTaskCreate(rx_dump_task, "midi_rx_dump", 3072, nullptr, 5, nullptr);
+    ESP_LOGI(TAG, "MIDI IN dump ready (GPIO%d, RX not inverted)", (int)PIN_MIDI_RX);
 }
 
 int32_t Midi_Send(const uint8_t* bytes, size_t len)

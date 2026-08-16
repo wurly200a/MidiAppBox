@@ -7,6 +7,11 @@
 // 24ppqn の MIDI Clock(0xF8)をタイマ駆動で生成する。テンポは新規に
 // 保持せず、予約時刻の差分(直前発音時刻→次回予約時刻)から都度導出する
 // (shared/hostapi_defs.h の "midi" セクション参照)。
+//
+// MIDI IN 受信バイトダンプ(Phase 8c、feature/midi-in-rx-dump ブランチ限定)。
+// GPIO15 = UART1 RX で受信した生バイトをそのまま 16 進ログに出す検証専用機能。
+// パース(ランニングステータス解釈、SysEx 組み立て等)は行わない。
+// Host API/ABI は変更しない(WASM 側に受信 API は追加しない)。
 #include <cstddef>
 #include <cstdint>
 
