@@ -1,4 +1,5 @@
-// Phase 9b Stage 1/2: MIDI ループバック診断アプリ(配線チェック・テンポ表示)。
+// Phase 9b Stage 1/2/3: MIDI ループバック診断アプリ
+// (配線チェック・テンポ表示・診断統計)。
 // 自機の MIDI OUT(hostapi_midi_send による Start/Stop、host 内部の
 // 24ppqn クロック生成)を自機の MIDI IN(hostapi_midi_recv)で受信し、
 // 受信生バイトを 16進表示する。パースは一切アプリ側で行う
@@ -58,6 +59,11 @@ const MIDI_CLOCK: u8 = 0xF8;
 const CLOCK_PPQN: u32 = 24; // MIDI Clock は 1/4 音符あたり 24 クロック
 const AVG_WINDOW: usize = 24; // Stage 2: 直近 24 クロック(=1拍)の移動平均
 
+// Stage 3: 120bpm(24ppqn)の公称クロック間隔。60,000,000 / (120*24) =
+// 20833.33...µs だが整数表示のため 20833 に丸める(バイアス ~0.33µs は
+// 実測ジッタ(数百µs オーダー)に対して無視できる)。
+const NOMINAL_INTERVAL_US: i64 = 20833;
+
 const BTN_X: i32 = 110;
 const BTN_Y: i32 = 190;
 const BTN_W: i32 = 100;
@@ -79,6 +85,17 @@ static mut CLOCK_RING: [u32; AVG_WINDOW] = [0; AVG_WINDOW];
 static mut CLOCK_RING_IDX: usize = 0;
 static mut CLOCK_RING_FILLED: usize = 0; // 0..=AVG_WINDOW
 static mut CLOCK_RING_SUM_US: u64 = 0; // CLOCK_RING の現在有効分の合計(O(1) 平均用)
+
+// Stage 3: セッション全体(START からの)診断統計。整数 Welford 法で
+// 平均・分散をオーバーフローなく逐次計算する(sum/sum^2 の直接保持は
+// 長時間実行で桁あふれしうるため避ける)。
+static mut STAT_COUNT: u32 = 0; // 区間(interval)のサンプル数
+static mut STAT_MEAN_US: i64 = 0; // 逐次平均(整数丸め、簡易実装)
+static mut STAT_M2: i64 = 0; // 偏差二乗和(分散 = M2 / count)
+static mut STAT_MIN_US: u32 = u32::MAX;
+static mut STAT_MAX_US: u32 = 0;
+static mut CLOCK_COUNT: u32 = 0; // 受信した 0xF8 の総数(区間数 = CLOCK_COUNT-1)
+static mut FIRST_CLOCK_TS_US: u64 = 0; // 0 = 未受信(期待クロック数の起点)
 
 struct Line {
     buf: [u8; 64],
@@ -110,6 +127,13 @@ impl Line {
             }
         }
         self.push(&digits[i..])
+    }
+    fn push_i32(&mut self, v: i32) -> &mut Line {
+        if v < 0 {
+            self.push(b"-").push_u32(v.unsigned_abs())
+        } else {
+            self.push_u32(v as u32)
+        }
     }
     fn push_hex_u8(&mut self, v: u8) -> &mut Line {
         const HEX: &[u8; 16] = b"0123456789ABCDEF";
@@ -148,11 +172,50 @@ fn push_recent(byte: u8) {
     }
 }
 
+/// u64 の整数平方根(Newton法)。Stage 3 の σ 計算用
+fn isqrt(v: u64) -> u64 {
+    if v == 0 {
+        return 0;
+    }
+    let mut x = v;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + v / x) / 2;
+    }
+    x
+}
+
+/// Stage 3: 整数 Welford 法でセッション全体の平均・分散を逐次更新する。
+/// 平均は整数丸め(簡易実装、指示書の許容範囲)。sum/sum^2 を直接持たない
+/// ため長時間実行でもオーバーフローしない
+fn welford_update(x_us: u32) {
+    unsafe {
+        STAT_COUNT += 1;
+        let x = x_us as i64;
+        let delta = x - STAT_MEAN_US;
+        STAT_MEAN_US += delta / STAT_COUNT as i64;
+        let delta2 = x - STAT_MEAN_US;
+        STAT_M2 += delta * delta2;
+        if x_us < STAT_MIN_US {
+            STAT_MIN_US = x_us;
+        }
+        if x_us > STAT_MAX_US {
+            STAT_MAX_US = x_us;
+        }
+    }
+}
+
 /// MIDI Clock(0xF8)受信を記録する。record_ts_us は hostapi_midi_recv の
 /// タイムスタンプ(µs、host が受信直後に打刻)。直前クロックとの間隔を
-/// リングバッファへ積む(初回受信時は間隔なしなのでスキップ)。
+/// リングバッファ(Stage 2)とセッション統計(Stage 3)へ積む(初回受信時は
+/// 間隔なしなのでスキップ)。
 fn note_clock(record_ts_us: u64) {
     unsafe {
+        CLOCK_COUNT = CLOCK_COUNT.saturating_add(1);
+        if FIRST_CLOCK_TS_US == 0 {
+            FIRST_CLOCK_TS_US = record_ts_us;
+        }
         if LAST_CLOCK_TS_US != 0 && record_ts_us > LAST_CLOCK_TS_US {
             let interval_us = (record_ts_us - LAST_CLOCK_TS_US) as u32;
             if CLOCK_RING_FILLED < AVG_WINDOW {
@@ -166,6 +229,7 @@ fn note_clock(record_ts_us: u64) {
                 CLOCK_RING_SUM_US += interval_us as u64;
                 CLOCK_RING_IDX = (CLOCK_RING_IDX + 1) % AVG_WINDOW;
             }
+            welford_update(interval_us);
         }
         LAST_CLOCK_TS_US = record_ts_us;
     }
@@ -177,6 +241,13 @@ fn reset_clock_stats() {
         CLOCK_RING_IDX = 0;
         CLOCK_RING_FILLED = 0;
         CLOCK_RING_SUM_US = 0;
+        STAT_COUNT = 0;
+        STAT_MEAN_US = 0;
+        STAT_M2 = 0;
+        STAT_MIN_US = u32::MAX;
+        STAT_MAX_US = 0;
+        CLOCK_COUNT = 0;
+        FIRST_CLOCK_TS_US = 0;
     }
 }
 
@@ -209,6 +280,67 @@ fn draw_bpm() {
         }
     }
     l.draw(12, 98);
+}
+
+/// Stage 3: 平均間隔の公称値(NOMINAL_INTERVAL_US)からの偏差(µs)と
+/// サンプル数
+fn draw_deviation() {
+    let mut l = Line::new();
+    unsafe {
+        if STAT_COUNT == 0 {
+            l.push(b"avg dev: --");
+        } else {
+            let dev = STAT_MEAN_US - NOMINAL_INTERVAL_US;
+            l.push(b"avg dev: ").push_i32(dev as i32).push(b"us  n=").push_u32(STAT_COUNT);
+        }
+    }
+    l.draw(12, 114);
+}
+
+/// Stage 3: クロック間隔の min/max(µs)
+fn draw_minmax() {
+    let mut l = Line::new();
+    unsafe {
+        if STAT_COUNT == 0 {
+            l.push(b"min/max: --");
+        } else {
+            l.push(b"min/max: ").push_u32(STAT_MIN_US).push(b"/").push_u32(STAT_MAX_US).push(b"us");
+        }
+    }
+    l.draw(12, 130);
+}
+
+/// Stage 3: クロック間隔の標準偏差 σ(µs)
+fn draw_sigma() {
+    let mut l = Line::new();
+    unsafe {
+        if STAT_COUNT == 0 {
+            l.push(b"sigma: --");
+        } else {
+            let variance = (STAT_M2 / STAT_COUNT as i64).max(0) as u64;
+            let sigma = isqrt(variance);
+            l.push(b"sigma: ").push_u32(sigma as u32).push(b"us");
+        }
+    }
+    l.draw(12, 146);
+}
+
+/// Stage 3: 受信クロック数 vs 経過時間から期待されるクロック数。
+/// 期待値も受信タイムスタンプ(RX 記録の時間軸)のみから算出し、
+/// app_tick 呼び出しタイミングは使わない
+fn draw_clock_count() {
+    let mut l = Line::new();
+    unsafe {
+        l.push(b"clocks: ").push_u32(CLOCK_COUNT).push(b" / exp ");
+        if FIRST_CLOCK_TS_US == 0 || LAST_CLOCK_TS_US <= FIRST_CLOCK_TS_US {
+            l.push(b"--");
+        } else {
+            let elapsed_us = (LAST_CLOCK_TS_US - FIRST_CLOCK_TS_US) as i64;
+            let expected = 1 + (elapsed_us / NOMINAL_INTERVAL_US) as u32;
+            l.push_u32(expected);
+        }
+    }
+    l.draw(12, 162);
 }
 
 fn draw_counts() {
@@ -290,6 +422,10 @@ pub extern "C" fn app_init() -> i32 {
     draw_counts();
     draw_hex();
     draw_bpm();
+    draw_deviation();
+    draw_minmax();
+    draw_sigma();
+    draw_clock_count();
     draw_button();
     0
 }
@@ -337,4 +473,8 @@ pub extern "C" fn app_tick() {
     draw_counts();
     draw_hex();
     draw_bpm();
+    draw_deviation();
+    draw_minmax();
+    draw_sigma();
+    draw_clock_count();
 }
