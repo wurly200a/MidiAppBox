@@ -47,8 +47,18 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
   不具合を実機検証で発見し、テンポ導出ロジックを「直前発音時刻」基準から
   「直前に受け取った予約時刻」基準に設計変更して解消。詳細は docs/dev-log.md
   の Phase 8b 節。
-- 次の候補: MIDI IN(TLP2361)側の検証・実装、Song Position Pointer 等の
-  高度な MIDI 同期はスコープ外として持ち越し。着手はユーザー指示待ち。
+- Phase 8c(docs/prompts/phase08c.md、MIDI IN ハードウェア検証・受信バイト
+  ダンプ)完了。TLP2361 受信回路の UART1 RX(GPIO15)を実機検証、外部機器
+  (UM-ONE)からの Note On/Off・ランニングステータス・アクティブセンシング・
+  SysEx(302バイト)を完全一致で受信、自機 OUT→IN ループバックでも Start/
+  Clock(24ppqn)/Stop がバイト落ちなく往復することを確認(IN側直列抵抗は
+  220Ωのまま変更不要)。**本 Phase の実装コード(RX 受信ダンプ機能)は
+  検証専用のため `feature/midi-in-rx-dump` ブランチにのみ保持し、main には
+  マージしていない。** 詳細・トラブル(フローティング入力のノイズ拾い、
+  IN回路の接触不良など)は docs/dev-log.md の Phase 8c 節。
+- 次の候補: MIDI IN のパース(ランニングステータス解釈・SysEx組み立て)・
+  Host API 化、Song Position Pointer 等の高度な MIDI 同期はスコープ外として
+  持ち越し。着手はユーザー指示待ち。
 
 ## 開発の進め方(このリポジトリでの作業ルール)
 
@@ -116,6 +126,12 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
   `rx_buffer_size=0` を受け付けない(`uart rx buffer length error` →
   `ESP_ERROR_CHECK` で abort・パニックリブート)。RX を使わなくても
   `UART_HW_FIFO_LEN` 超の小さなバッファ(例: 256)を明示確保すること(8a)。
+- フローティング(未接続)な UART RX ピンは、受信回路がトーテムポール出力
+  (本来アイドル時は能動駆動で安定するはず)でも、配線漏れ等で実際には
+  未接続だと周辺ノイズ(商用電源由来と推定される 50Hz 周期など)を拾って
+  連続的に疑似バイト列を生成しうる。周期性のあるノイズは配線漏れの兆候として
+  疑うこと。テスターは応答が遅く(数百ms〜)、UART 1バイト分の時間
+  (31250bpsで約320µs)より短いノイズパルスを検出できない点にも注意(8c)。
 
 ### herdr / ビルド
 - 完了待ちは hpane.sh の番兵方式のみ。ログ文言への `wait output` 直マッチは
@@ -164,6 +180,19 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
 - `scripts/hpane.sh send` はテキスト入力のみで割り込みキーは送れない。
   `idf.py monitor` 等を止めるには `herdr pane send-keys <pane_id> "C-c"`
   を使う(`"C-]"` のような角括弧付きキー名は `invalid_key` で拒否される)(8a)。
+  ただし `C-c` が `idf_monitor` に効かず(`Writing to serial is timing out`
+  を繰り返すだけで停止しない)場合がある。その際は `docker ps` で該当
+  コンテナ ID を確認し `docker kill <container id>` する方が確実(8c)。
+- 長時間(概ね数分)接続した `idf.py monitor` が、`docker ps` 上は `Up` の
+  ままなのに実機からの新規出力を一切転送しなくなる(サイレントに詰まる)
+  ことがある。実機側は正常に動き続けている(再接続すれば続きのログが
+  取れる)。定期的に再起動するか、長時間の連続監視に依存しないテスト設計
+  (短い操作単位で確認)にする方が安全。`--no-reset` での再接続はこの環境
+  ではむしろ詰まりやすく、通常のリセット付き再接続の方が安定した(8c)。
+- ユーザーが実機を触りながら現象を確認したい場合、`esp32-monitor` ペインに
+  直接フィルタ済みのライブログを出すと効率的(`idf.py monitor | tee <保存用
+  ログ> | grep --line-buffered -E "<pattern>"`)。ホスト側ファイルを都度
+  読み上げて報告するより、ユーザー自身がペインを見ながら物理操作できる(8c)。
 
 ### Linux ホスト(SDL / GUI 自動化)
 - この開発環境(Wayland + XWayland、GNOME/Mutter)では `ffmpeg -f x11grab` は
