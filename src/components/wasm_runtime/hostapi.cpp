@@ -399,6 +399,14 @@ int32_t native_hostapi_midi_send(wasm_exec_env_t exec_env, const char* bytes, ui
     return midi::Midi_Send(reinterpret_cast<const uint8_t*>(bytes), len);
 }
 
+// ---- MIDI IN (Phase 9a) ----
+// buf は WAMR 境界検証済み(シグネチャ "*~")。実装は midi:: に委譲する。
+int32_t native_hostapi_midi_recv(wasm_exec_env_t exec_env, char* buf, uint32_t len)
+{
+    (void)exec_env;
+    return midi::Midi_Recv(buf, len);
+}
+
 uint32_t native_hostapi_now_ms(wasm_exec_env_t exec_env)
 {
     (void)exec_env;

@@ -40,6 +40,18 @@ void Midi_NotifyBeatFired(uint32_t fired_ms);
 
 // アプリのライフサイクルに合わせてリセットする(hostapi_audio_reset() から
 // 呼ぶ)。クロック生成を強制停止し、staging 状態も破棄する。
+// MIDI IN 受信リングバッファ(Phase 9a)も破棄する。
 void Midi_Reset();
+
+// ---- MIDI IN(Phase 9a)----
+// UART1 RX(GPIO15, TLP2361 受信回路, Phase 8c で検証済み)。受信バイトを
+// UART イベントタスクで受信直後にタイムスタンプ付きでリングバッファへ積み、
+// この関数で吸い出す。パースは一切行わない(shared/hostapi_defs.h の
+// "midi" セクション参照)。
+//
+// buf は hostapi_midi_recv_t の配列として書き込む。buf_len はバイト数。
+// buf_len / 16 件を上限にリングバッファから吸い出し、書いた件数を返す
+// (0 = なし)。
+int32_t Midi_Recv(void* buf, size_t buf_len);
 
 } // namespace midi

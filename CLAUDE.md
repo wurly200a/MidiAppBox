@@ -22,7 +22,7 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
 - ユーザーとのやりとり(会話・報告・質問)は日本語。
 - git のコミットメッセージは英語。
 
-## 現在地 (2026-08-12 時点)
+## 現在地 (2026-08-16 時点)
 
 - check-workflow(docs/prompts/check-workflow.md)完了。herdr ペイン運用を
   「ラベルごとに別タブ」から「**共有タブ1つに3列×2行で分割配置**」に変更
@@ -56,9 +56,20 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
   検証専用のため `feature/midi-in-rx-dump` ブランチにのみ保持し、main には
   マージしていない。** 詳細・トラブル(フローティング入力のノイズ拾い、
   IN回路の接触不良など)は docs/dev-log.md の Phase 8c 節。
-- 次の候補: MIDI IN のパース(ランニングステータス解釈・SysEx組み立て)・
-  Host API 化、Song Position Pointer 等の高度な MIDI 同期はスコープ外として
-  持ち越し。着手はユーザー指示待ち。
+- Phase 9a(docs/prompts/phase09a.md、MIDI IN 受信 Host API)完了。
+  `hostapi_midi_recv(buf_ptr, buf_len) -> n` を追加(16 バイトアラインドの
+  `hostapi_midi_recv_t { timestamp_us: u64, byte: u8, _reserved[7] }`、
+  `hostapi_poll_event` と同型の out-buffer API)。実機は UART1 RX
+  (GPIO15、Phase 8c 検証済み設定)のイベントタスクが受信直後に
+  `esp_timer_get_time()` で打刻しリングバッファ(256件)へ積む。Linux は
+  ALSA シーケンサ(snd_seq DUPLEX)経由で UM-ONE から実受信(当初案の
+  「0件スタブ」からユーザー承認で実受信に変更)。パースは一切行わない
+  (Phase 9b の責務)。実機・Linux 双方で UM-ONE からの Note On/Off・
+  Clock の実受信とタイムスタンプ単調増加を確認、回帰(free heap 一致・
+  WARN/ERROR なし)も確認済み。詳細は docs/dev-log.md の Phase 9a 節。
+- 次の候補: Phase 9b(WASM アプリ側での MIDI IN パース・テンポ検出、
+  docs/prompts/phase09b.md)。Song Position Pointer 等の高度な MIDI 同期は
+  スコープ外として持ち越し。着手はユーザー指示待ち。
 
 ## 開発の進め方(このリポジトリでの作業ルール)
 

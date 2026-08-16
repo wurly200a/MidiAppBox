@@ -140,6 +140,48 @@
  *       (クリック予約のリセットと同じタイミング)。
  *     - Song Position Pointer 等、Continue を位置復帰として使う高度な
  *       同期はスコープ外(v1 では Continue は Start と同じ扱い)。
+ *
+ *   hostapi_midi_recv(buf_ptr, buf_len) -> n  (Phase 9a)
+ *     前回呼び出し以降に MIDI IN で受信した生バイトを、ホストが受信直後に
+ *     打ったタイムスタンプ付きで返す。buf は hostapi_midi_recv_t の配列
+ *     (buf_len はバイト数)。ホストは buf_len / 16 件を上限に書き、
+ *     入り切らない分はリングバッファに残して次回返す(0 = なし)。
+ *     hostapi_poll_event と同じ「out-buffer + 件数を返す」系のシグネチャで、
+ *     不正なポインタは WAMR の境界検証でトラップされるため native 実装は
+ *     実質的に常に 0 以上を返す(バッファ不足は 0 件)。
+ *
+ *     パース(ランニングステータス解釈、SysEx 組み立て、Clock 検出など)は
+ *     一切行わない。生バイト + タイムスタンプのみを渡す(パースは
+ *     Phase 9b、アプリ側の責務)。
+ *
+ *     ホスト内部のリングバッファは 256 件。溢れたら最古を捨てる
+ *     (hostapi_poll_event の入力イベントキューと同じ割り切り。
+ *     アプリ側へのオーバーフロー通知 API はない)。
+ *
+ *     タイムスタンプの時間軸: 実機は esp_timer_get_time()(µs、MIDI Clock
+ *     送信側と同一時間軸)、Linux は起動基準の単調増加 µs クロック
+ *     (SDL_GetPerformanceCounter 由来。実機の esp_timer とは epoch が異なる
+ *     が、レコード間の差分計算にのみ使う前提なので単調増加であれば十分)。
+ *     受信 UART/ALSA イベント直後に打刻するため、app_tick の ~5ms ジッタの
+ *     影響を受けない。
+ *
+ *     タイムスタンプ分解能の注意: 1 回の受信イベントに複数バイトが
+ *     まとまった場合(ランニングステータスなしで連続送信される
+ *     マルチバイトメッセージ等、バイト間に idle gap がない場合)、それらは
+ *     同一の代表時刻(≈最後のバイトの到達時刻)を持つ。バイト間に十分な
+ *     idle gap がある単発メッセージ(MIDI Clock 0xF8 等の System Realtime
+ *     単独送信)はバイト単位に近い精度でタイムスタンプが付く。実機の UART
+ *     RX FIFO 閾値/timeout は Phase 8c の検証済み設定から変更していない
+ *     (詳細は docs/dev-log.md Phase 9a 節)。
+ *
+ *     実機: UART1 RX(GPIO15, TLP2361 受信回路, Phase 8c で検証済み)の
+ *     UART イベントタスクで受信直後に打刻し、専用リングバッファへ積む。
+ *     Linux: ALSA シーケンサ(snd_seq)経由で実受信する(hostapi_midi_send
+ *     と同じ、名前に "UM-ONE" を含むポートへの自動接続。見つからない/
+ *     ALSA が使えない環境では常に 0 件を返す)。
+ *
+ *     アプリ破棄時、ホストは受信リングバッファを破棄する(クリック予約・
+ *     MIDI Clock 生成のリセットと同じタイミング)。
  */
 #pragma once
 
@@ -160,6 +202,14 @@ enum {
     HOSTAPI_EV_TOUCH_UP   = 2,
     /* 将来: TOUCH_MOVE, KEY, ... 追加は非破壊 */
 };
+
+/* MIDI IN 受信レコード。16 bytes, align 8。フィールドはリトルエンディアン
+ * (ABI 凍結、Phase 9a)。_reserved は常に 0、将来拡張用でサイズ変更はしない。 */
+typedef struct {
+    uint64_t timestamp_us; /* ホストが受信直後に打った時刻(µs、単調増加) */
+    uint8_t  byte;          /* 受信バイト1個 */
+    uint8_t  _reserved[7];
+} hostapi_midi_recv_t;
 
 /* hostapi_audio_ctrl のコマンド */
 enum {
@@ -207,8 +257,9 @@ enum {
     X(hostapi_tone_define, "(iiiii)i")    \
     X(hostapi_tone_play, "(i)i")          \
     X(hostapi_tone_schedule, "(ii)i")     \
-    /* midi (Phase 8b) */                 \
-    X(hostapi_midi_send, "(*~)i")
+    /* midi (Phase 8b / 9a) */             \
+    X(hostapi_midi_send, "(*~)i")         \
+    X(hostapi_midi_recv, "(*~)i")
 
 /* NativeSymbol 配列の初期化子を生成するヘルパ */
 #define HOSTAPI_SYMBOL_ENTRY(name, sig) { #name, (void*)native_##name, sig, NULL },
