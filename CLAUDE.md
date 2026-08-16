@@ -22,7 +22,7 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
 - ユーザーとのやりとり(会話・報告・質問)は日本語。
 - git のコミットメッセージは英語。
 
-## 現在地 (2026-08-16 時点)
+## 現在地 (2026-08-17 時点)
 
 - check-workflow(docs/prompts/check-workflow.md)完了。herdr ペイン運用を
   「ラベルごとに別タブ」から「**共有タブ1つに3列×2行で分割配置**」に変更
@@ -67,9 +67,22 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
   (Phase 9b の責務)。実機・Linux 双方で UM-ONE からの Note On/Off・
   Clock の実受信とタイムスタンプ単調増加を確認、回帰(free heap 一致・
   WARN/ERROR なし)も確認済み。詳細は docs/dev-log.md の Phase 9a 節。
-- 次の候補: Phase 9b(WASM アプリ側での MIDI IN パース・テンポ検出、
-  docs/prompts/phase09b.md)。Song Position Pointer 等の高度な MIDI 同期は
-  スコープ外として持ち越し。着手はユーザー指示待ち。
+- Phase 9b(docs/prompts/phase09b.md、ループバック診断アプリ)完了。
+  `wasm-apps/midi_loopback/` を Stage 1(受信生バイトの16進表示)→
+  Stage 2(直近24クロック移動平均からの実測 BPM)→ Stage 3(セッション統計:
+  クロック間隔 min/max/σ・公称値との偏差・受信数 vs 期待数、整数 Welford 法)
+  の順に実機検証しながら実装。Host API/ABI 変更なし。120bpm ループバック
+  実測により、**受信クロック数が期待値を大きく下回る(試験により71〜93%
+  程度)現象と、公称間隔の数十〜数百倍に達する巨大な外れ値**を複数回
+  (画面無操作の条件でも)確認し、3仮説のうち「(b) クロックの取りこぼし」が
+  最も有力と判断(系統的な平均間隔のずれを示す (a) の証拠はなし)。
+  根本原因の特定(host 側クロック生成タイマ or WASM 側 tick 予約間隔の
+  疑い)は次フェーズの調査対象として dev-log に提案済み(送信側修正は
+  本フェーズのスコープ外)。詳細は docs/dev-log.md の Phase 9b 節。
+- 次の候補: Phase 9b で見つかったクロック取りこぼし(取りこぼし率
+  71〜93%、公称間隔の数十〜数百倍の外れ値)の原因調査。Song Position
+  Pointer 等の高度な MIDI 同期はスコープ外として持ち越し。着手はユーザー
+  指示待ち。
 
 ## 開発の進め方(このリポジトリでの作業ルール)
 
