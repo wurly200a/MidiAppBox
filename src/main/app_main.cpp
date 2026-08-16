@@ -11,6 +11,7 @@
 #include "touch.hpp"
 #include "audio.hpp"
 #include "midi.hpp"
+#include "phase08b_qy70_debug.hpp" // Phase 8b 追記: QY70 切り分け(一時コード)
 #include "wasm_runtime.hpp"
 #include "hostapi.hpp"
 #include "launcher.hpp"
@@ -53,6 +54,8 @@ extern "C" void app_main()
 
     // MIDI OUT の常設初期化(Phase 8a で確認済みの UART1 設定。起動時1回のみ)
     midi::Midi_Init();
+
+    phase08b_qy70_debug_start(); // Phase 8b 追記: QY70 切り分け(一時コード)
 
     if (!wasmrt::runtime_init()) {
         ESP_LOGE(TAG, "WASM runtime init failed");
