@@ -1,4 +1,4 @@
-// Phase 9b Stage 1: MIDI ループバック診断アプリ(配線チェック)。
+// Phase 9b Stage 1/2: MIDI ループバック診断アプリ(配線チェック・テンポ表示)。
 // 自機の MIDI OUT(hostapi_midi_send による Start/Stop、host 内部の
 // 24ppqn クロック生成)を自機の MIDI IN(hostapi_midi_recv)で受信し、
 // 受信生バイトを 16進表示する。パースは一切アプリ側で行う
@@ -54,6 +54,9 @@ const PERIOD_MS: u32 = 500; // BPM 120 固定(診断用の測定条件)
 
 const RECV_BUF_LEN: usize = 64; // 1 tick(100ms)分のバーストを吸収するのに十分な余裕
 const RECENT_LEN: usize = 16; // Stage 1 の 16進表示(8バイト x 2行)
+const MIDI_CLOCK: u8 = 0xF8;
+const CLOCK_PPQN: u32 = 24; // MIDI Clock は 1/4 音符あたり 24 クロック
+const AVG_WINDOW: usize = 24; // Stage 2: 直近 24 クロック(=1拍)の移動平均
 
 const BTN_X: i32 = 110;
 const BTN_Y: i32 = 190;
@@ -67,6 +70,15 @@ static mut LAST_BEAT: u32 = u32::MAX;
 static mut RECENT: [u8; RECENT_LEN] = [0; RECENT_LEN];
 static mut RECENT_COUNT: usize = 0; // 0..=RECENT_LEN(埋まっている件数)
 static mut TOTAL_BYTES: u32 = 0;
+
+// Stage 2: 実測 BPM(直近 AVG_WINDOW 件のクロック間隔の移動平均から算出)。
+// タイムスタンプは hostapi_midi_recv のレコード値(host 打刻の µs)のみを
+// 使う(app_tick の呼び出しタイミングは時刻として使わない)。
+static mut LAST_CLOCK_TS_US: u64 = 0; // 0 = 前回クロック未受信
+static mut CLOCK_RING: [u32; AVG_WINDOW] = [0; AVG_WINDOW];
+static mut CLOCK_RING_IDX: usize = 0;
+static mut CLOCK_RING_FILLED: usize = 0; // 0..=AVG_WINDOW
+static mut CLOCK_RING_SUM_US: u64 = 0; // CLOCK_RING の現在有効分の合計(O(1) 平均用)
 
 struct Line {
     buf: [u8; 64],
@@ -103,6 +115,19 @@ impl Line {
         const HEX: &[u8; 16] = b"0123456789ABCDEF";
         self.push(&[HEX[(v >> 4) as usize], HEX[(v & 0x0f) as usize]])
     }
+    /// v は実値を 100 倍した固定小数点(例: 119.42 -> 11942)。小数 2 桁で表示
+    fn push_fixed100(&mut self, v: i64) -> &mut Line {
+        if v < 0 {
+            self.push(b"-");
+        }
+        let a = v.unsigned_abs();
+        self.push_u32((a / 100) as u32).push(b".");
+        let frac = (a % 100) as u32;
+        if frac < 10 {
+            self.push(b"0");
+        }
+        self.push_u32(frac)
+    }
     fn draw(&self, x: i32, y: i32) {
         unsafe { hostapi_draw_text(x, y, self.buf.as_ptr(), self.len as u32) };
     }
@@ -121,6 +146,69 @@ fn push_recent(byte: u8) {
         }
         TOTAL_BYTES = TOTAL_BYTES.saturating_add(1);
     }
+}
+
+/// MIDI Clock(0xF8)受信を記録する。record_ts_us は hostapi_midi_recv の
+/// タイムスタンプ(µs、host が受信直後に打刻)。直前クロックとの間隔を
+/// リングバッファへ積む(初回受信時は間隔なしなのでスキップ)。
+fn note_clock(record_ts_us: u64) {
+    unsafe {
+        if LAST_CLOCK_TS_US != 0 && record_ts_us > LAST_CLOCK_TS_US {
+            let interval_us = (record_ts_us - LAST_CLOCK_TS_US) as u32;
+            if CLOCK_RING_FILLED < AVG_WINDOW {
+                CLOCK_RING[CLOCK_RING_FILLED] = interval_us;
+                CLOCK_RING_SUM_US += interval_us as u64;
+                CLOCK_RING_FILLED += 1;
+                CLOCK_RING_IDX = CLOCK_RING_FILLED % AVG_WINDOW;
+            } else {
+                CLOCK_RING_SUM_US -= CLOCK_RING[CLOCK_RING_IDX] as u64;
+                CLOCK_RING[CLOCK_RING_IDX] = interval_us;
+                CLOCK_RING_SUM_US += interval_us as u64;
+                CLOCK_RING_IDX = (CLOCK_RING_IDX + 1) % AVG_WINDOW;
+            }
+        }
+        LAST_CLOCK_TS_US = record_ts_us;
+    }
+}
+
+fn reset_clock_stats() {
+    unsafe {
+        LAST_CLOCK_TS_US = 0;
+        CLOCK_RING_IDX = 0;
+        CLOCK_RING_FILLED = 0;
+        CLOCK_RING_SUM_US = 0;
+    }
+}
+
+/// 直近クロック間隔の移動平均から BPM を算出(x100 固定小数点)。
+/// クロックが 1 件も溜まっていなければ None
+fn estimate_bpm_x100() -> Option<i64> {
+    unsafe {
+        if CLOCK_RING_FILLED == 0 {
+            return None;
+        }
+        let avg_interval_us = CLOCK_RING_SUM_US / CLOCK_RING_FILLED as u64;
+        if avg_interval_us == 0 {
+            return None;
+        }
+        let quarter_period_us = avg_interval_us * CLOCK_PPQN as u64;
+        // bpm = 60,000,000 / quarter_period_us、x100 固定小数点
+        Some((6_000_000_000i64) / quarter_period_us as i64)
+    }
+}
+
+fn draw_bpm() {
+    let mut l = Line::new();
+    l.push(b"BPM: ");
+    match estimate_bpm_x100() {
+        Some(v) => {
+            l.push_fixed100(v);
+        }
+        None => {
+            l.push(b"--");
+        }
+    }
+    l.draw(12, 98);
 }
 
 fn draw_counts() {
@@ -167,6 +255,7 @@ fn reset_stats() {
         RECENT_COUNT = 0;
         TOTAL_BYTES = 0;
     }
+    reset_clock_stats();
 }
 
 fn toggle_running(now: u32) {
@@ -200,6 +289,7 @@ pub extern "C" fn app_init() -> i32 {
     reset_stats();
     draw_counts();
     draw_hex();
+    draw_bpm();
     draw_button();
     0
 }
@@ -230,8 +320,8 @@ pub extern "C" fn app_tick() {
     }
 
     // MIDI IN の受信ドレイン。タイムスタンプは hostapi_midi_recv のレコード値
-    // (host が受信直後に打刻した µs 値)のみを使う想定だが、Stage 1 では
-    // 生バイト表示のみで時刻は未使用(Stage 2/3 で使用)。
+    // (host が受信直後に打刻した µs 値)のみを使う(app_tick 呼び出しの
+    // タイミングは時刻として使わない、約 5ms のジッタがあるため)。
     let mut recs = [MidiRecv { timestamp_us: 0, byte: 0, _reserved: [0; 7] }; RECV_BUF_LEN];
     let n = unsafe {
         hostapi_midi_recv(recs.as_mut_ptr() as *mut u8,
@@ -239,8 +329,12 @@ pub extern "C" fn app_tick() {
     };
     for rec in &recs[..n.max(0) as usize] {
         push_recent(rec.byte);
+        if rec.byte == MIDI_CLOCK {
+            note_clock(rec.timestamp_us);
+        }
     }
 
     draw_counts();
     draw_hex();
+    draw_bpm();
 }
