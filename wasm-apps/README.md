@@ -33,3 +33,4 @@ cp target/wasm32-unknown-unknown/release/<app>.wasm ./<app>.wasm
 | `mp3player/` | Phase 6B〜。`hostapi_audio_*` で MP3 を制御(PLAY/PAUSE/STOP/VOL±、FINISHED 検知)。6C でファイル列挙+プレイリスト対応 |
 | `clicktest/` | Phase 7A 検証。`hostapi_click_schedule` で BPM120 を予約発音。タップで SCHED⇔LEGACY(tick 内直呼び)を切替してジッタ比較 |
 | `metronome/` | Phase 7B/7C/7D。メトロノーム本体。可変 BPM(40-240、±5/±1・長押し連打加速)・拍子(2/3/4/6)・START/STOP・拍ランプ・音量調整(V-/V+)。小節頭は `hostapi_tone_*` で定義したアクセント音(1568Hz)、発音は tone_schedule への毎 tick 再予約 |
+| `midi_loopback/` | Phase 9b。MIDI ループバック診断アプリ。`hostapi_midi_send` の Start/Stop(BPM120固定)で自機 MIDI OUT の 24ppqn クロックを駆動し、`hostapi_midi_recv` で自機 MIDI IN の受信を診断表示(Stage1: 受信生バイトの16進表示・累積バイト数、Stage2: 実測 BPM、Stage3: クロック間隔の min/max/σ・公称値との偏差・受信数 vs 期待数) |
