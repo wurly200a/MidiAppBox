@@ -97,6 +97,110 @@ static mut STAT_MAX_US: u32 = 0;
 static mut CLOCK_COUNT: u32 = 0; // 受信した 0xF8 の総数(区間数 = CLOCK_COUNT-1)
 static mut FIRST_CLOCK_TS_US: u64 = 0; // 0 = 未受信(期待クロック数の起点)
 
+// ---- Phase 9c E1: 分布指標(ヒストグラム・ロバスト統計・外れ値・BPM分布) ----
+// バケット境界は「有力仮説」節の予測値(公称 20833us / 欠落時 約41674us)を
+// 分離できるよう設計: <20000, 20000-20499, 20500-20999, 21000-21499,
+// 21500-29999, 30000-39999, 40000-44999, 45000+
+//
+// 実装上の重要な変更(2026-08-23、実機検証で判明): 当初は生サンプルを
+// [u16; 6000](約12KB)で保持して真の中央値を算出する設計だったが、実機で
+// "WASM module instantiate failed: allocate linear memory failed" となり
+// 起動不能になった(Linux ホストでは同一 WAMR プール 48KB でも成功しており、
+// 実機側のプール断片化が Linux より厳しいためと推定)。そのため生サンプルの
+// 保持をやめ、静的メモリの増分を数百バイトに抑える方式に変更した:
+// - 「中央値」はヒストグラムの累積カウントから該当バケットの代表値を返す
+//   近似値(厳密な中央値ではない。ログには "med~=" と表記して区別する)。
+// - 外れ値除外統計(ロバスト平均・σ・min/max)は「中央値の1.5倍」ではなく
+//   公称間隔(NOMINAL_INTERVAL_US)の1.5倍を固定閾値とした逐次 Welford 計算。
+//   公称値と欠落時の予測値(約41674us、公称の約2倍)は 2 倍以上離れており、
+//   閾値をどちらのベースにしても分離結果はほぼ変わらない。
+const HIST_BUCKETS: usize = 8;
+const HIST_REPR_US: [u32; HIST_BUCKETS] = [19750, 20250, 20750, 21250, 25750, 35000, 42500, 50000]; // 各バケットの代表値(概ね中点)
+const OUTLIER_LIVE_CAP: usize = 8;
+const BPM_DIST_BUCKETS: usize = 5; // 114-116 / 116-118 / 118-119.5 / 119.5-120.5 / その他
+
+static mut HIST_COUNTS: [u32; HIST_BUCKETS] = [0; HIST_BUCKETS];
+
+// ロバスト統計: 公称値(NOMINAL_INTERVAL_US)の1.5倍を閾値とし、それ以下の
+// 区間だけを対象に整数 Welford 法で逐次計算する(STAT_* と同様の方式)。
+static mut EX_COUNT: u32 = 0;
+static mut EX_MEAN_US: i64 = 0;
+static mut EX_M2: i64 = 0;
+static mut EX_MIN_US: u32 = u32::MAX;
+static mut EX_MAX_US: u32 = 0;
+static mut OUT_COUNT: u32 = 0; // 閾値超(外れ値)の総数
+
+// 外れ値の実測値そのもの(リングバッファ、直近 OUTLIER_LIVE_CAP 件)。
+static mut OUTLIER_LIVE: [u32; OUTLIER_LIVE_CAP] = [0; OUTLIER_LIVE_CAP];
+
+static mut BPM_DIST: [u32; BPM_DIST_BUCKETS] = [0; BPM_DIST_BUCKETS];
+
+// STOP 時のログ出力専用センチネル座標(Phase 9c 検証用)。x を画面幅(320)
+// より十分大きい値にすることで、hostapi.cpp 側の検証専用ガード
+// (PHASE9C_STATLOG_TEST)がこの draw_text 呼び出しだけを判別してシリアル
+// ログへ転送できる(Host API のシグネチャ・contractは一切変更しない)。
+// 画面上は非表示(retained モデルのオフスクリーン描画、実害なし)。
+const LOG_X: i32 = 9000;
+const LOG_Y_BASE: i32 = 0;
+
+fn hist_bucket(x: u32) -> usize {
+    if x < 20000 {
+        0
+    } else if x < 20500 {
+        1
+    } else if x < 21000 {
+        2
+    } else if x < 21500 {
+        3
+    } else if x < 30000 {
+        4
+    } else if x < 40000 {
+        5
+    } else if x < 45000 {
+        6
+    } else {
+        7
+    }
+}
+
+/// ヒストグラムの累積カウントから中央値が属するバケットを求め、その代表値
+/// (HIST_REPR_US)を近似中央値として返す(厳密な中央値ではない)。
+fn approx_median_us() -> i64 {
+    unsafe {
+        let mut total: u32 = 0;
+        for i in 0..HIST_BUCKETS {
+            total += HIST_COUNTS[i];
+        }
+        if total == 0 {
+            return 0;
+        }
+        let half = total / 2;
+        let mut cum: u32 = 0;
+        for i in 0..HIST_BUCKETS {
+            cum += HIST_COUNTS[i];
+            if cum > half {
+                return HIST_REPR_US[i] as i64;
+            }
+        }
+        HIST_REPR_US[HIST_BUCKETS - 1] as i64
+    }
+}
+
+/// v_x100 は BPM の x100 固定小数点
+fn bpm_dist_bucket(v_x100: i64) -> usize {
+    if v_x100 >= 11400 && v_x100 < 11600 {
+        0
+    } else if v_x100 >= 11600 && v_x100 < 11800 {
+        1
+    } else if v_x100 >= 11800 && v_x100 < 11950 {
+        2
+    } else if v_x100 >= 11950 && v_x100 < 12050 {
+        3
+    } else {
+        4
+    }
+}
+
 struct Line {
     buf: [u8; 64],
     len: usize,
@@ -230,6 +334,34 @@ fn note_clock(record_ts_us: u64) {
                 CLOCK_RING_IDX = (CLOCK_RING_IDX + 1) % AVG_WINDOW;
             }
             welford_update(interval_us);
+
+            // ---- Phase 9c E1: ヒストグラム / ロバスト統計(逐次) / 外れ値 / BPM分布 ----
+            HIST_COUNTS[hist_bucket(interval_us)] += 1;
+            // 外れ値判定: 公称値(NOMINAL_INTERVAL_US)の1.5倍を固定閾値とする
+            // (中央値ベースではない簡易版。上のコメント参照)。
+            if (interval_us as i64) <= NOMINAL_INTERVAL_US * 3 / 2 {
+                EX_COUNT += 1;
+                let x = interval_us as i64;
+                let delta = x - EX_MEAN_US;
+                EX_MEAN_US += delta / EX_COUNT as i64;
+                let delta2 = x - EX_MEAN_US;
+                EX_M2 += delta * delta2;
+                if interval_us < EX_MIN_US {
+                    EX_MIN_US = interval_us;
+                }
+                if interval_us > EX_MAX_US {
+                    EX_MAX_US = interval_us;
+                }
+            } else {
+                let pos = (OUT_COUNT as usize) % OUTLIER_LIVE_CAP;
+                OUTLIER_LIVE[pos] = interval_us;
+                OUT_COUNT = OUT_COUNT.saturating_add(1);
+            }
+            if CLOCK_RING_FILLED == AVG_WINDOW {
+                if let Some(bpm) = estimate_bpm_x100() {
+                    BPM_DIST[bpm_dist_bucket(bpm)] += 1;
+                }
+            }
         }
         LAST_CLOCK_TS_US = record_ts_us;
     }
@@ -248,6 +380,76 @@ fn reset_clock_stats() {
         STAT_MAX_US = 0;
         CLOCK_COUNT = 0;
         FIRST_CLOCK_TS_US = 0;
+        HIST_COUNTS = [0; HIST_BUCKETS];
+        EX_COUNT = 0;
+        EX_MEAN_US = 0;
+        EX_M2 = 0;
+        EX_MIN_US = u32::MAX;
+        EX_MAX_US = 0;
+        OUT_COUNT = 0;
+        BPM_DIST = [0; BPM_DIST_BUCKETS];
+    }
+}
+
+/// Phase 9c E1: STOP 時に全統計値を 1 行ずつ、画面外センチネル座標
+/// (LOG_X, LOG_Y_BASE)へ draw_text する。hostapi.cpp 側の検証専用ガード
+/// (PHASE9C_STATLOG_TEST)がこれを検知してシリアルログへ転送する
+/// (docs/prompts/phase09c.md の要求: 「測定値の読み取りはカメラ静止画に
+/// 頼らないこと」への対応)。画面上は非表示のため通常表示には影響しない。
+fn dump_stop_stats() {
+    unsafe {
+        // 1行目: ヒストグラム(8バケット)
+        let mut l = Line::new();
+        l.push(b"H");
+        for i in 0..HIST_BUCKETS {
+            l.push(b" ").push_u32(HIST_COUNTS[i]);
+        }
+        l.draw(LOG_X, LOG_Y_BASE);
+
+        let median = approx_median_us(); // ヒストグラム近似(厳密な中央値ではない)
+        let ex_n = EX_COUNT;
+        let ex_mean = EX_MEAN_US;
+        let variance = if EX_COUNT > 0 {
+            (EX_M2 / EX_COUNT as i64).max(0) as u64
+        } else {
+            0
+        };
+        let ex_sigma = isqrt(variance) as u32;
+        let ex_min = if EX_COUNT > 0 { EX_MIN_US } else { 0 };
+        let ex_max = EX_MAX_US;
+        let out_n = OUT_COUNT;
+
+        // 2行目: 近似中央値・ロバスト統計のサンプル数・ロバスト平均
+        let mut l2 = Line::new();
+        l2.push(b"R med~=").push_i32(median as i32);
+        l2.push(b" exN=").push_u32(ex_n);
+        l2.push(b" exMean=").push_i32(ex_mean as i32);
+        l2.draw(LOG_X, LOG_Y_BASE + 16);
+
+        // 3行目: ロバスト σ・min/max・外れ値件数
+        let mut l3 = Line::new();
+        l3.push(b"R exSig=").push_u32(ex_sigma);
+        l3.push(b" exMin=").push_u32(ex_min);
+        l3.push(b" exMax=").push_u32(ex_max);
+        l3.push(b" outN=").push_u32(out_n);
+        l3.draw(LOG_X, LOG_Y_BASE + 32);
+
+        // 4行目: 外れ値(公称値x1.5閾値)の実測値そのもの(最大8件)
+        let mut l4 = Line::new();
+        l4.push(b"O cnt=").push_u32(OUT_COUNT);
+        let cnt = OUT_COUNT.min(OUTLIER_LIVE_CAP as u32) as usize;
+        for i in 0..cnt {
+            l4.push(b" ").push_u32(OUTLIER_LIVE[i]);
+        }
+        l4.draw(LOG_X, LOG_Y_BASE + 48);
+
+        // 5行目: 見かけ BPM 分布(24クロック移動平均、5バケット)
+        let mut l5 = Line::new();
+        l5.push(b"B");
+        for i in 0..BPM_DIST_BUCKETS {
+            l5.push(b" ").push_u32(BPM_DIST[i]);
+        }
+        l5.draw(LOG_X, LOG_Y_BASE + 64);
     }
 }
 
@@ -399,6 +601,7 @@ fn toggle_running(now: u32) {
             reset_stats();
             hostapi_midi_send(MIDI_START.as_ptr(), 1);
         } else {
+            dump_stop_stats(); // Phase 9c E1: 全統計値をログ用センチネルへ出力
             hostapi_click_schedule(0); // 予約キャンセル
             hostapi_midi_send(MIDI_STOP.as_ptr(), 1);
         }

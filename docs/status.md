@@ -85,7 +85,24 @@ CLAUDE.md から独立して更新する(CLAUDE.md 本体は書き換えない)�
   専用の内容なので `docs/results/phase04.md` へ統合(`## 計測結果詳細` 節)し、
   `poc-results.md` は削除。合わせて元の `docs/results/phase01-04.md` は
   `phase01-03.md`(Phase 1〜3)と `phase04.md`(Phase 4)に分割した。
-- 次の候補: Phase 9b 追記で見つかった、配線修正後も残る小さな偏差
-  (BPM が公称より約1.8低い、取りこぼし約1.4%)の再現性を複数回の
-  再測定で確認する。Song Position Pointer 等の高度な MIDI 同期は
-  スコープ外として持ち越し。着手はユーザー指示待ち。
+- Phase 9c(docs/prompts/phase09c.md、MIDI Clock 送信タイミングの再測定と
+  欠落要因の特定)完了(2026-08-23)。`wasm-apps/midi_loopback/` に E1
+  (ヒストグラム・ロバスト統計・外れ値・見かけBPM分布)を恒久機能として追加、
+  実機で E1(受信側)・E2(送信側、`#ifdef PHASE9C_TXLOG_TEST` 検証専用)を
+  同一セッションで3回測定。`Midi_NotifyBeatFired()` の毎拍位相リセット
+  (`esp_timer_stop`→`start_periodic`)が120bpmでマージン8µsしかなく、
+  クリックスケジューラのジッタで約61%の拍でクロックが1発欠落することを
+  送受信双方のデータで確認(「有力仮説」節の全予測値と実測が高精度で一致)。
+  E3(`#ifdef PHASE9C_FREERUN_TEST`、周期不変なら再アームしない対照実験)で
+  外れ値が3回とも完全に0件になることを確認し、位相リセットが直接の原因と
+  実証。E3は暫定検証のみで、検証専用コード(TXLOG/FREERUN/ログ転送フック)は
+  全て削除し main の挙動を測定前に復元(`git diff` 差分なしを確認)。
+  実機検証中に E2 用の検証専用バッファ(12KB)が ESP32 の一般ヒープを
+  圧迫し WASM の "allocate linear memory failed" を誘発する事象を発見・
+  解消(教訓を docs/lessons.md に追記)。既存アプリ7種の回帰・Linux ホスト
+  起動も確認済み。詳細は docs/results/phase09c.md。
+- 次の候補: Phase 9c で確定した原因(毎拍位相リセット)を踏まえ、ホスト側に
+  音楽時間軸(テンポマップ・拍/小節カウンタ)を持たせるアーキテクチャ刷新
+  フェーズの設計。120bpm 以外のテンポでの系統誤差確認、Song Position
+  Pointer 等の高度な MIDI 同期はスコープ外として持ち越し。着手はユーザー
+  指示待ち。

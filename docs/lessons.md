@@ -9,6 +9,14 @@ herdr 運用・ビルド手順そのものの教訓は `docs/workflow.md` に一
 - ヒープからの恒久確保(タスク等)は最大連続ブロックを分断する。恒久物は静的確保に(7B-fix)。
 - WAMR プールは現在 **48KB**(実測消費 ~27.5KB)。Linux も parity で 48KB を維持(7B-fix)。
 - FATFS は sector 512 + max_files 4(6B。sector 4096 は連続ヒープ ~38KB を要求し WAMR と衝突)。
+- WAMR プール(s_wamr_heap、native 側の固定 BSS)とは別に、native 側の
+  一般ヒープ(FreeRTOS ヒープ)も WASM の linear memory 確保に影響しうる。
+  native 側(hostapi.cpp/midi.cpp 等)に大きな静的バッファを追加すると、
+  WAMR プール自体は変わらなくても一般ヒープの largest free block が縮小し
+  "allocate linear memory failed" を誘発することがある(実機で largest
+  free block が約15KBまで逼迫していた実績あり。Linux ホストでは同一の
+  WAMR プールサイズでも再現しなかった点に注意)。追加前に `heap_init` ログ・
+  `heap_caps_get_largest_free_block` で一般ヒープの余裕も確認すること(9c)。
 
 ## WAMR
 - WASM 実行スレッドは pthread で作る(`os_self_thread()` が `pthread_self()` を呼ぶ)(P1)。
