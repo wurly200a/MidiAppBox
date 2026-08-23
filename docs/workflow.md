@@ -12,16 +12,18 @@
   - **§2–3 推奨手順**: 既定の具体的なやり方。改善してよいが、**実行前に**差分と理由を
     提示して承認を得ること。承認なしに別のやり方へ置き換えない(試行錯誤で
     別解を探ることも含めて禁止)。承認されて成功したら本書と CLAUDE.md を更新する。
-- 役割分担: **CLAUDE.md は常時従う原則の要点と現在地、本書はワークフローの具体
+- 役割分担: **CLAUDE.md は常時従う原則の要点、本書は herdr/hpane ワークフローの具体
   (ペイン構成・コマンド形・タイムアウト・初回セットアップ・手順)の原本**。
+  herdr/hpane に関する記載は CLAUDE.md には重複させず本書に一本化する。
   両者が食い違う場合は作業を進めず、食い違い自体を報告すること。
+  **セッションの最初に必ず本書を通して読むこと**(CLAUDE.md の指示)。
 
 ## §1 不変条件(変更にはユーザー承認が必要)
 
 再現性を壊す典型は「待ち方・実行形式・環境の無断変更」である。以下は理由込みで
 固定されており、一見改善に見える変更(例: 番兵方式をやめて `herdr wait output` で
-ログ文言を直接待つ)が過去に失敗した実績に基づく(各項の根拠は CLAUDE.md
-教訓チェックリストと docs/dev-log.md)。
+ログ文言を直接待つ)が過去に失敗した実績に基づく(各項の根拠は docs/lessons.md と
+docs/results/)。
 
 1. **シェル実行はすべて `scripts/hpane.sh` 経由**。直接 Bash で実行しない。
 2. **完了待ちは `hpane.sh run` の番兵トークン方式のみ**。`herdr wait output` を
@@ -31,9 +33,13 @@
 4. **ペインに対話状態を持たせない**。docker 内作業も毎回一発コマンド。
    cwd ドリフトに注意し、ビルドは絶対パス+成果物のタイムスタンプ/シンボル確認をセットで。
 5. **Docker イメージタグはリポジトリトップ README.md 準拠**。build と flash/monitor は
-   同一タグ。devcontainer CLI(`devcontainer up`/`exec`)は使わない。
+   同一タグ。devcontainer CLI(`devcontainer up`/`exec`)は使わない(README と同じ
+   生イメージへの `docker run`+`docker exec` では通る同一ソース・同一 pin バージョンの
+   managed component が、devcontainer CLI 経由のビルドだと `-Wignored-qualifiers` が
+   `-Werror` 化されてビルド失敗する現象を確認済み。根本原因未特定)。
    非対話コマンドで `idf.py` を使うときは `bash -c 'source /opt/esp-idf/export.sh && ...'`
-   で明示 source。
+   で明示 source(`docker run ... bash -lc '...'` はログインシェル扱いで `~/.bashrc` を
+   読まないため不可)。
 6. **monitor は `PYTHONUNBUFFERED=1 ... | tee <ログ>` 方式**で常駐(`send`)させ、
    `waitfor` とログファイルで読む。monitor 再起動は既定でボードをリセットする点に注意。
 7. **タイムアウトは §6.2 の既定値表に従う**。超過時は勝手に次へ進まず、
@@ -77,7 +83,8 @@
   `I2C transaction unexpected nack detected` 一連、Touch online 前)は無視してよい。
 
 ### 2.3 記録
-- 実施結果は docs/dev-log.md に追記(冒頭に対応する指示書への参照)。
+- 実施結果は `docs/results/<対応するファイル>.md` に追記(冒頭に対応する指示書への
+  参照)。ファイルが無ければ `docs/prompts/` の指示書名に対応させて新規作成する。
 - キャプチャは `captures/<タスク名>/` に置き、`git status` に現れないことを確認。
 
 ## §3 推奨手順(既定の具体的なやり方)
@@ -139,9 +146,13 @@ pgrep -af midibox_host                          # 残留なしを確認(何も�
 **`docker run --rm`(都度起動)に統一する。** 持続コンテナ + `docker exec`
 方式は、`entrypoint.sh` の gosu 降格(`docker run`)を経由しない `exec`
 (root 実行)と混在すると `build.ninja`/`.ninja_log` 等の所有者が割れて
-`Permission denied` を起こす実績があるため使わない(詳細は CLAUDE.md
-教訓チェックリスト・docs/dev-log.md Phase 8a)。ビルド・フラッシュ・モニタ
-すべてこの方式で統一する。
+`Permission denied` を起こす実績があるため使わない(詳細は docs/results/phase08a.md)。
+ビルド・フラッシュ・モニタすべてこの方式で統一する。
+
+`managed_components/`(gitignore 対象)を「再取得可能なキャッシュ」と即断して
+中身を確認せず `rm -rf` してはならない。ハッシュ不一致で `idf.py fullclean` が
+保護的に停止した場合、削除前に該当ファイルの差分を確認すること(ローカル修正が
+入っていた可能性があるファイルを不用意に削除してしまった実績あり)。
 
 ```bash
 # ビルド(README のタグの生イメージを都度起動。export.sh を明示 source)
@@ -174,7 +185,13 @@ pgrep -af midibox_host                          # 残留なしを確認(何も�
 続けているため、`docker kill <container id>` で該当コンテナを落として
 モニタを再起動すれば復旧する。`herdr pane send-keys <pane_id> "C-c"` は
 効かないことがあるので、`docker ps` で確認して直接 kill する方が確実
-(詳細は CLAUDE.md 教訓チェックリスト・docs/dev-log.md Phase 8c)。
+(詳細は docs/results/phase08c.md)。
+
+ユーザーが実機を触りながら現象を確認したい場合、`esp32-monitor` ペインに
+直接フィルタ済みのライブログを出すと効率的
+(`idf.py monitor | tee <保存用ログ> | grep --line-buffered -E "<pattern>"`)。
+ホスト側ファイルを都度読み上げて報告するより、ユーザー自身がペインを見ながら
+物理操作できる。
 
 ### 3.3 実機の動作検証(カメラ+人間操作)
 
@@ -196,7 +213,7 @@ pgrep -af midibox_host                          # 残留なしを確認(何も�
 
 - 生成物は `ffprobe` で h264 / 正常な duration を確認。
 - 動画・音声ずれは原因特定・修正済み(2026-07-20、check-workflow-routine 後の
-  別タスク。詳細は scripts/cam-rec.sh 冒頭コメントと docs/dev-log.md)。根本原因は
+  別タスク。詳細は scripts/cam-rec.sh 冒頭コメントと docs/results/av-sync-fix.md)。根本原因は
   ffmpeg が v4l2/pulse の 2 入力を**それぞれ自分の先頭時刻で 0 にリセット**し、
   音声が映像より系統的に約164ms 遅れて始まる相対差を破棄していたこと(結果として
   音声が早く再生される)。pulse 入力に `-itsoffset`(既定 0.16s、環境変数
@@ -208,25 +225,26 @@ pgrep -af midibox_host                          # 残留なしを確認(何も�
 
 本書の手順を「そのまま一巡実行して確認するだけ」の回として実行する場合の追加ルール:
 
-- **変更してよいのは docs/dev-log.md への実施記録の追記のみ**。scripts/・CLAUDE.md・
-  ソースコードは触らない。新ラベル追加・レイアウト変更もしない。
+- **変更してよいのは docs/results/check-workflow-routine.md への実施記録の追記のみ**。
+  scripts/・CLAUDE.md・ソースコードは触らない。新ラベル追加・レイアウト変更もしない。
 - 手順: §3.0 → §3.1 → §3.2 → §3.3(操作内容は「なにかしらのアプリを実行する」で
   よい。metronome 推奨)。
-- 想定外の失敗はその場で修正・回避せず、報告して停止する。CLAUDE.md
-  教訓チェックリスト記載の既知対処のみ適用可(それでも解決しなければ停止)。
+- 想定外の失敗はその場で修正・回避せず、報告して停止する。docs/lessons.md
+  記載の既知対処のみ適用可(それでも解決しなければ停止)。
 - 完了条件:
   - 全手順が hpane.sh 経由で完走。
   - `captures/<タスク名>/` に実機の動画+静止画。`git status` に `captures/` が出ない。
   - free heap 一致・警告なしを確認済み。
-  - dev-log 追記(指示書参照、ビルド/フラッシュ/モニタの成否、heap 確認、警告有無の要約)。
-  - `git status --porcelain` の差分が dev-log のみ。コミットは dev-log 追記のみ(英語)。
+  - docs/results/check-workflow-routine.md に追記(指示書参照、ビルド/フラッシュ/
+    モニタの成否、heap 確認、警告有無の要約)。
+  - `git status --porcelain` の差分が上記追記のみ。コミットもそれのみ(英語)。
 
 ## §5 推奨手順を改善したくなったら
 
 1. 実行前に、変更点(現行 → 提案)と理由・期待効果を提示して承認を得る。
-2. 承認後に試し、成功したら本書 §3 を更新。新たな教訓は CLAUDE.md
-   教訓チェックリストにも一行追加する。
-3. 失敗したら元のやり方に戻し、試行と結果を dev-log に記録する。
+2. 承認後に試し、成功したら本書 §3 を更新。新たな教訓は docs/lessons.md
+   にも一行追加する。
+3. 失敗したら元のやり方に戻し、試行と結果を docs/results/ の該当ファイルに記録する。
 4. §1 の不変条件に触れる変更は、より慎重に: 過去の失敗実績(該当する教訓)を
    引用した上で、なぜ今回は成立するのかを説明すること。
 
@@ -254,7 +272,9 @@ camera        | screen
 そこから right split した `unix-build` を右列ルートとし、各列内は真上のペインから
 down split して積む。プロンプトとの高さ比率は `HPANE_PROMPT_ROW_RATIO`
 (既定 0.35)で調整できる。作成後のペインサイズはユーザーが `herdr pane resize`
-等で自由に変えてよい。
+等で自由に変えてよい。全ラベルの一括操作には `hpane.sh ensure-all`
+(まとめて展開)/`hpane.sh close-all`(まとめて閉じる。既に閉じているラベルは
+スキップ)、単体には `hpane.sh close <name>` が使える。
 
 | ラベル | 用途 | 実行形式 |
 |---|---|---|

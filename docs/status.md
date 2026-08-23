@@ -1,0 +1,88 @@
+# 現在地
+
+各エントリの詳細は `docs/results/` の該当ファイルを参照。このファイルは
+CLAUDE.md から独立して更新する(CLAUDE.md 本体は書き換えない)。
+
+## 2026-08-23 時点
+
+- check-workflow(docs/prompts/check-workflow.md)完了。herdr ペイン運用を
+  「ラベルごとに別タブ」から「**共有タブ1つに3列×2行で分割配置**」に変更
+  (`scripts/hpane.sh` 改修。`run`/`send`/`waitfor`/`read` のインタフェースは不変)。
+  撮影スクリプトを `scripts/cam-rec.sh` 等に整備し、出力を `captures/`
+  (.gitignore 対象)に集約。Linux ホストの画面キャプチャ(x11grab)・
+  クリックによる UI 自動操作は本開発環境(Wayland/XWayland + GNOME)の制約で
+  信頼できる形にできず、スコープ外として持ち越し(詳細は
+  docs/prompts/check-workflow.md 追記節、docs/results/check-workflow.md)。
+- Phase 7(7A 予約発音 / 7B メトロノーム / 7B-fix DMA 二重クリック / 7C トーンパレット /
+  7D テンポ1刻み・ボリューム調整)完了。詳細は docs/results/phase07.md。
+- Zenn 連載: 第 1〜7 回公開済み、第 8〜17 回はスケジュール公開設定済み(〜2026-07-28、詳細は docs/zenn.md)。
+- Phase 8a(docs/prompts/phase08a_midi_out_bringup.md、MIDI OUT 疎通確認)完了。
+  自作 MIDI OUT 回路(GPIO18=UART1 TX、2SC1815)を UM-ONE 経由で確認、
+  UM-ONE LED 点灯・`aseqdump` で Note On/Off 正常受信を確認。検証専用コードは
+  確認後に削除済み(Host API/ABI 変更なし)。詳細・トラブルは
+  docs/results/phase08a.md。
+- Phase 8b(docs/prompts/phase08b_midi_clock_api.md、MIDI Clock 出力 Host API)
+  完了。`hostapi_midi_send` を追加し、メトロノームの START/STOP に MIDI
+  Start/Stop を相乗り、host 内部で 24ppqn クロックを生成(実機 UART1・Linux
+  は ALSA シーケンサ経由で UM-ONE へ実送信)。テンポ変更時にクロックが暴走する
+  不具合を実機検証で発見し、テンポ導出ロジックを「直前発音時刻」基準から
+  「直前に受け取った予約時刻」基準に設計変更して解消。詳細は
+  docs/results/phase08b.md。
+- Phase 8c(docs/prompts/phase08c.md、MIDI IN ハードウェア検証・受信バイト
+  ダンプ)完了。TLP2361 受信回路の UART1 RX(GPIO15)を実機検証、外部機器
+  (UM-ONE)からの Note On/Off・ランニングステータス・アクティブセンシング・
+  SysEx(302バイト)を完全一致で受信、自機 OUT→IN ループバックでも Start/
+  Clock(24ppqn)/Stop がバイト落ちなく往復することを確認(IN側直列抵抗は
+  220Ωのまま変更不要)。**本 Phase の実装コード(RX 受信ダンプ機能)は
+  検証専用のため `feature/midi-in-rx-dump` ブランチにのみ保持し、main には
+  マージしていない。** 詳細・トラブル(フローティング入力のノイズ拾い、
+  IN回路の接触不良など)は docs/results/phase08c.md。
+- Phase 9a(docs/prompts/phase09a.md、MIDI IN 受信 Host API)完了。
+  `hostapi_midi_recv(buf_ptr, buf_len) -> n` を追加(16 バイトアラインドの
+  `hostapi_midi_recv_t { timestamp_us: u64, byte: u8, _reserved[7] }`、
+  `hostapi_poll_event` と同型の out-buffer API)。実機は UART1 RX
+  (GPIO15、Phase 8c 検証済み設定)のイベントタスクが受信直後に
+  `esp_timer_get_time()` で打刻しリングバッファ(256件)へ積む。Linux は
+  ALSA シーケンサ(snd_seq DUPLEX)経由で UM-ONE から実受信(当初案の
+  「0件スタブ」からユーザー承認で実受信に変更)。パースは一切行わない
+  (Phase 9b の責務)。実機・Linux 双方で UM-ONE からの Note On/Off・
+  Clock の実受信とタイムスタンプ単調増加を確認、回帰(free heap 一致・
+  WARN/ERROR なし)も確認済み。詳細は docs/results/phase09a.md。
+- Phase 9b(docs/prompts/phase09b.md、ループバック診断アプリ)完了。
+  `wasm-apps/midi_loopback/` を Stage 1(受信生バイトの16進表示)→
+  Stage 2(直近24クロック移動平均からの実測 BPM)→ Stage 3(セッション統計:
+  クロック間隔 min/max/σ・公称値との偏差・受信数 vs 期待数、整数 Welford 法)
+  の順に実機検証しながら実装。Host API/ABI 変更なし。120bpm ループバック
+  実測により、**受信クロック数が期待値を大きく下回る(試験により71〜93%
+  程度)現象と、公称間隔の数十〜数百倍に達する巨大な外れ値**を複数回
+  (画面無操作の条件でも)確認し、3仮説のうち「(b) クロックの取りこぼし」が
+  最も有力と判断(系統的な平均間隔のずれを示す (a) の証拠はなし)。
+  **追記(2026-08-17)**: ユーザーが実機配線の接触不良を発見・修正し
+  再測定した結果、平均偏差は +183µs、外れ値は公称の約2倍(1回分の
+  取りこぼし相当)、clocks/exp は 98.6% まで改善。**当初の大きな外れ値・
+  大幅な取りこぼしの主因は配線の接触不良だった**と判断を訂正。修正後も
+  残る小さな偏差(BPM 118.22、~1.4%の取りこぼし)の再現性確認が次の
+  調査対象。詳細は docs/results/phase09b.md。
+- herdr ペイン運用を「共有タブ1つに3列×2行」から「**セッション自身のタブに
+  プロンプトを最上段・全幅(既定で高さ35%)、その下2列×3行(左列:
+  esp32-build/esp32-monitor/camera、右列: unix-build/zenn/screen)**」に変更
+  (`scripts/hpane.sh` 改修。ルートペインの作成元が「新規タブ」から「呼び出し元
+  セッションのプロンプトペイン」に変わった以外、`ensure`/`run`/`send`/`waitfor`/
+  `read` のインタフェースは不変)。`ensure-all`/`close`/`close-all` コマンドも追加。
+  詳細は docs/workflow.md §6.1。
+- check-workflow-routine(docs/prompts/check-workflow-routine.md)完了
+  (2026-08-23)。上記の新レイアウトで §3.0〜§3.3 を一巡実行し全完走(exit 0 /
+  `app_main` 到達 / free heap 開始時と一致 / 既知の1件を除き警告なし)。
+  途中で `hosts/linux/build/` が旧リポジトリパスの stale な CMakeCache を
+  指していてビルド失敗する事象を発見、対処を docs/workflow.md §3 に追記して
+  から再実行し解消。詳細は docs/results/check-workflow-routine.md。
+- CLAUDE.md とその周辺ドキュメントを整理(2026-08-23)。`docs/dev-log.md` を
+  `docs/results/`(フェーズ毎ファイル、`docs/prompts/` と対応)へ分割・移動、
+  `docs/poc-results.md` も `docs/results/poc-results.md` へ移動。「現在地」
+  (本ファイル)・「アーキテクチャ方針」(docs/architecture.md)・
+  「教訓チェックリスト」(docs/lessons.md)を CLAUDE.md から分離。herdr/hpane
+  関連の重複記載は docs/workflow.md に一本化。
+- 次の候補: Phase 9b 追記で見つかった、配線修正後も残る小さな偏差
+  (BPM が公称より約1.8低い、取りこぼし約1.4%)の再現性を複数回の
+  再測定で確認する。Song Position Pointer 等の高度な MIDI 同期は
+  スコープ外として持ち越し。着手はユーザー指示待ち。
