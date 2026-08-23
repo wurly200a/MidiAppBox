@@ -97,6 +97,18 @@ herdr pane list --workspace 1            # 初回のみ: JSON 構造の実物を
 実際の JSON に合わせて修正し、修正内容を報告すること(改修は §5 の手続き。
 一巡チェックモード §4 の実行中はスクリプトを修正せず、報告して停止する)。
 
+ビルドキャッシュ関連のエラー(例: `cmake` の
+`CMakeCache.txt directory ... is different than the directory ... where
+CMakeCache.txt was created`、`idf.py` の managed_components ハッシュ不一致等)が
+出た場合は、該当する `build/` ディレクトリ等(いずれも .gitignore 対象の
+生成物)をクリーンにしてから同じコマンドを再実行してよい。**毎回のクリーン
+ビルドはしない**(このエラーが出たときだけの対処)。Linux ホストの場合の
+クリーン例:
+
+```bash
+rm -rf hosts/linux/build
+```
+
 ### 3.1 Linux ホスト
 
 ```bash
