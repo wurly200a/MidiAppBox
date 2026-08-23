@@ -1624,3 +1624,84 @@ clocks 8954 / exp 9081(**98.6%**)。
 の再現性を複数回の測定で確認することを提案する。
 
 **検証エビデンス**: `captures/phase09b/stage3_redo/`(.gitignore 対象)。
+
+# check-workflow-routine: 開発ワークフロー一巡チェック(定期実施)
+
+## 実施記録 (2026-08-23) — 完了
+
+対応: `docs/prompts/check-workflow-routine.md`。docs/workflow.md §4「一巡チェック
+モード」として、確立済みワークフロー(§3.0〜§3.3)を一巡実行し確認した回。
+出力先タスク名は `captures/check-workflow-routine/`、実機操作は metronome。
+
+**チェック着手前の準備(本チェックの一巡実行そのものではないため、コミット
+分離のうえ実施。§4 の「scripts/・CLAUDE.md 不変」制約はチェック開始後にのみ
+適用)**:
+- ユーザー要望により herdr ペイン運用を「共有タブ1つに3列×2行」から
+  「**セッション自身のタブに、プロンプトを最上段・全幅(既定で高さ35%)、
+  その下2列×3行(左列: esp32-build/esp32-monitor/camera、右列:
+  unix-build/zenn/screen)**」に変更(`scripts/hpane.sh` 改修、
+  `ensure`/`run`/`send`/`waitfor`/`read` のインタフェースは不変)。実装前に
+  `ensure` による全展開・`herdr pane close` による全閉じ(閉じるとタブ自体も
+  自動消滅することを確認)を実地検証し、列の振り分け・ratio の意味
+  (アンカー側が確保する比率)もユーザー承認を得た上で反映(コミット
+  `758411e`)。
+- 上記の動作確認のため `unix-build` を一度ビルドしたところ、
+  `hosts/linux/build/` の `CMakeCache.txt` が旧リポジトリパス
+  (`/home/wurly/project/esp32/MidiAppBox`)を指しており cmake がエラー
+  (想定外の失敗のため一旦報告して停止)。ユーザー指示により
+  「ビルドキャッシュ関連エラー時のみ `build/` 等をクリーンにして再実行する
+  (毎回のクリーンビルドはしない)」旨を docs/workflow.md §3 に追記
+  (コミット `9094637`)してから一巡チェックを最初からやり直した。
+
+**§3.0(環境確認)**: プロンプトペインと同居する新レイアウトで `unix-build`
+(ルートである `esp32-build` も再帰的に作成)を `ensure`、2 回叩いて同一
+pane_id(`wB:p1H`)を返すこと(冪等性)を確認。`run` の一発 echo テストも
+exit 0 で成功。
+
+**§3.1(Linux ホスト)**: 上記の準備で判明した stale な `hosts/linux/build/`
+を `rm -rf` してから `cmake -B build && cmake --build build -j` でビルド
+(exit 0。`-Wformat-truncation` 系の既知警告のみ)。単発モードで
+`metronome.wasm` を起動、`app started` を確認後数秒動作させ、`xdotool key
+Escape` で終了(`xdotool search` が装飾ウィンドウ含む複数ウィンドウ ID を
+返したため `getwindowpid`/`pgrep -af midibox_host` で対象を照合)。ログは
+`app started` → `single mode: ...` → `app stopped` の順で一貫、stderr 相当の
+警告なし。`pgrep -af midibox_host` はプロセス残留なし。
+
+**§3.2(ESP32 実機)**: ビルド・フラッシュとも `docker run --rm`(ビルドは
+マウントのみ、フラッシュ・モニタは `--device=/dev/ttyACM0 --group-add 20`)の
+都度起動方式で実施し、両方とも exit 0 / `app_main` 到達を確認。
+
+**§3.3(実機動作検証)**: `camera` ペインで `cam-rec.sh
+captures/check-workflow-routine` により録画開始 → ユーザーに「ランチャーから
+metronome 起動 → START → 数秒 → STOP → 終了」を依頼 → 完了報告を受けて録画停止
+→ `cam-still.sh` で静止画取得。`ffprobe` で動画が h264/aac, 1280x720, 34.07 秒の
+正常な mp4 であることを確認、`ffmpeg` プロセス残留なし。シリアルログで
+`Audio_Init: free heap 156372 -> 109168` → `WASM: runtime ready (pool 49152
+bytes), free heap 102780` → `app: app_init() = 0, free heap 38568, tick loop
+start` → `app: stopped (ok), free heap 59032 (at start 59032), largest block
+31744` を確認、**free heap は開始時と完全一致(リークなし)**。モニタ用の
+`docker run --rm -it` コンテナはチェック終了後に `docker kill` で片付けた。
+
+**観測した警告**: ボード起動直後の `W (392) spi_flash: Detected size(16384k)
+larger than the size in the binary image header(2048k). ...` のみ
+(2026-07-20 の前回実施記録と同一の、パーティションテーブル上の想定フラッシュ
+サイズと実機搭載フラッシュの差に関する ESP-IDF 起動時の定型警告。アプリ
+非依存で毎回起動時に出る想定であり、完了条件の判定には影響しないと判断)。
+それ以外の WARN/ERROR/`no free slot` はなし。
+
+**完了条件確認**: 全手順が `hpane.sh` 経由で完走(§3.0〜§3.3)。
+`captures/check-workflow-routine/` に実機の動画(`cam_rec_143200.mp4`)・
+静止画(`cam_still_143240.png`)を確認、`git status --porcelain` に `captures/`
+は現れない(.gitignore 機能)。free heap 一致・(既知の1件を除き)警告なしを
+確認。本チェック内(§3.0〜§3.3 の実行そのもの)では scripts/・CLAUDE.md・
+ソースコードへの変更なし(レイアウト変更とビルドキャッシュ対処の文書化は
+チェック着手前の準備として別コミットで実施済み、上記参照)。
+
+**手順の改善案(§5 に基づき報告のみ、本チェック内では未実施)**: 特になし。
+着手前に判明した問題(レイアウトの見づらさ、ビルドキャッシュエラー)は
+いずれも着手前の準備でユーザー承認済みの手順として反映済みのため、
+一巡実行自体からは新規の改善提案は出なかった。
+
+検証エビデンス: `captures/check-workflow-routine/cam_rec_143200.mp4`、
+`captures/check-workflow-routine/cam_still_143240.png`(いずれも `.gitignore`
+対象、リポジトリには含まれない)。
