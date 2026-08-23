@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # hpane.sh — herdr 名前付きペイン ヘルパー
 #
-# 全ラベルを「共有タブ 1 つ」の中に分割ペインとして配置し(1 タブ内分割表示)、
-# ペイン単位のラベル(`herdr pane rename`)で解決する。
+# 全ラベルを、このスクリプトを呼び出しているセッション自身のタブ(プロンプト
+# ペインが属するタブ)の中に分割ペインとして配置し、ペイン単位のラベル
+# (`herdr pane rename`)で解決する。
 # 「なければ作る / あればそのまま使う」「番兵トークンで確実に完了待ち」を提供する。
 #
 # 使い方:
@@ -16,12 +17,16 @@
 # 注意: herdr の pane ID は永続ではない(閉じると詰められる)。
 #       このスクリプトは ID を保存せず、毎回ペインのラベルから解決し直す。
 #
-# レイアウト(check-workflow で 1 タブ内分割に変更。3 列 x 2 行):
-#   esp32-build(ルート) - esp32-monitor           - unix-build
-#   camera              - zenn                    - screen
-#   (esp32-monitor は esp32-build から right split、unix-build は esp32-monitor
-#    から right split、camera/zenn/screen はそれぞれ esp32-build/esp32-monitor/
-#    unix-build から down split)
+# レイアウト(check-workflow-routine でプロンプトペイン同居に変更。
+# 最上段にプロンプト(全幅)、その下を 2 列 x 3 行):
+#   プロンプト(セッション開始時から存在するペイン。全幅、既定で高さ 35%)
+#   ------------------------------------------------
+#   esp32-build   | unix-build
+#   esp32-monitor | zenn
+#   camera        | screen
+#   (esp32-build はプロンプトペインから down split で作る「ルート」。
+#    unix-build は esp32-build から right split。esp32-monitor/zenn/camera/
+#    screen はそれぞれ真上のペインから down split。)
 #   ANCHOR_OF/DIRECTION_OF で定義。ensure_pane は未作成のアンカーを再帰的に
 #   先に ensure するため、どのラベルから呼んでも同じ配置に組み上がる
 #   (呼び出し順序に依存しない)。
@@ -30,22 +35,22 @@ set -euo pipefail
 
 WORKSPACE="${HPANE_WORKSPACE:-1}"
 DEFAULT_TIMEOUT_MS="${HPANE_TIMEOUT_MS:-1800000}"   # 既定 30 分
-SHARED_TAB_LABEL="${HPANE_SHARED_TAB_LABEL:-midiappbox-panes}"
+PROMPT_ROW_RATIO="${HPANE_PROMPT_ROW_RATIO:-0.35}"  # ルート作成時、プロンプト側が確保する高さ比率
 
-# ラベル → (アンカーラベル, 分割方向)。アンカーが空 = 共有タブのルート。
+# ラベル → (アンカーラベル, 分割方向)。アンカーが空 = プロンプトペインから作るルート。
 declare -A ANCHOR_OF=(
     [esp32-build]=""
+    [unix-build]="esp32-build"
     [esp32-monitor]="esp32-build"
-    [unix-build]="esp32-monitor"
-    [camera]="esp32-build"
-    [zenn]="esp32-monitor"
-    [screen]="unix-build"
+    [zenn]="unix-build"
+    [camera]="esp32-monitor"
+    [screen]="zenn"
 )
 declare -A DIRECTION_OF=(
-    [esp32-monitor]="right"
     [unix-build]="right"
-    [camera]="down"
+    [esp32-monitor]="down"
     [zenn]="down"
+    [camera]="down"
     [screen]="down"
 )
 
@@ -76,37 +81,11 @@ print(matches[0])
 ' "$NAME_ARG"
 }
 
-_py_tab_id_for_label() {
-python3 -c '
-import sys, json
-label = sys.argv[1]
-data = json.load(sys.stdin)
-tabs = data.get("result", {}).get("tabs", [])
-matches = [t["tab_id"] for t in tabs if t.get("label") == label and "tab_id" in t]
-if not matches:
-    sys.exit(1)
-print(matches[0])
-' "$SHARED_TAB_LABEL"
-}
-
-_py_any_pane_id_for_tab() {
-python3 -c '
-import sys, json
-tab_id = sys.argv[1]
-data = json.load(sys.stdin)
-panes = data.get("result", {}).get("panes", [])
-for p in panes:
-    if p.get("tab_id") == tab_id and "pane_id" in p:
-        print(p["pane_id"]); sys.exit(0)
-sys.exit(1)
-' "$1"
-}
-
-_py_root_pane_from_create() {
+_py_current_pane_id() {
 python3 -c '
 import sys, json
 data = json.load(sys.stdin)
-print(data["result"]["root_pane"]["pane_id"])
+print(data["result"]["pane"]["pane_id"])
 '
 }
 
@@ -126,13 +105,6 @@ resolve_pane_by_label() {
     herdr pane list --workspace "$WORKSPACE" 2>/dev/null | _py_pane_id_for_label
 }
 
-# 共有タブが既に存在するなら、そのタブ内の任意のペインを返す(root split 用)。
-resolve_any_pane_in_shared_tab() {
-    local tab_id
-    tab_id=$(herdr tab list --workspace "$WORKSPACE" 2>/dev/null | _py_tab_id_for_label) || return 1
-    herdr pane list --workspace "$WORKSPACE" 2>/dev/null | _py_any_pane_id_for_tab "$tab_id"
-}
-
 ensure_pane() {
     local label="$1" pane anchor_label direction anchor_pane split_out
     if pane=$(resolve_pane_by_label "$label"); then
@@ -141,15 +113,13 @@ ensure_pane() {
 
     anchor_label="${ANCHOR_OF[$label]:-}"
     if [ -z "$anchor_label" ]; then
-        # ルートラベル: 共有タブがあればそこに split、無ければタブごと新規作成
-        if pane=$(resolve_any_pane_in_shared_tab); then
-            split_out=$(herdr pane split "$pane" --direction right --no-focus)
-            pane=$(echo "$split_out" | _py_pane_id_from_split)
-        else
-            local create_out
-            create_out=$(herdr tab create --workspace "$WORKSPACE" --label "$SHARED_TAB_LABEL" --no-focus)
-            pane=$(echo "$create_out" | _py_root_pane_from_create)
-        fi
+        # ルートラベル: このスクリプトを呼んでいるセッションのプロンプトペインの
+        # 下に down split してワークエリアを作る(同一タブ内に同居させる)。
+        local prompt_pane
+        prompt_pane=$(herdr pane current --current 2>/dev/null | _py_current_pane_id)
+        [ -n "$prompt_pane" ] || { echo "hpane: failed to resolve current (prompt) pane" >&2; exit 1; }
+        split_out=$(herdr pane split "$prompt_pane" --direction down --ratio "$PROMPT_ROW_RATIO" --no-focus)
+        pane=$(echo "$split_out" | _py_pane_id_from_split)
     else
         anchor_pane=$(ensure_pane "$anchor_label")
         direction="${DIRECTION_OF[$label]}"

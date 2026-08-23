@@ -22,7 +22,7 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
 - ユーザーとのやりとり(会話・報告・質問)は日本語。
 - git のコミットメッセージは英語。
 
-## 現在地 (2026-08-17 時点)
+## 現在地 (2026-08-23 時点)
 
 - check-workflow(docs/prompts/check-workflow.md)完了。herdr ペイン運用を
   「ラベルごとに別タブ」から「**共有タブ1つに3列×2行で分割配置**」に変更
@@ -82,6 +82,14 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
   大幅な取りこぼしの主因は配線の接触不良だった**と判断を訂正。修正後も
   残る小さな偏差(BPM 118.22、~1.4%の取りこぼし)の再現性確認が次の
   調査対象。詳細は docs/dev-log.md の Phase 9b 節・追記節。
+- check-workflow-routine(docs/prompts/check-workflow-routine.md)着手前の準備として、
+  herdr ペイン運用を「共有タブ1つに3列×2行」から「**セッション自身のタブに
+  プロンプトを最上段・全幅(既定で高さ35%)、その下2列×3行(左列:
+  esp32-build/esp32-monitor/camera、右列: unix-build/zenn/screen)**」に変更
+  (`scripts/hpane.sh` 改修。ルートペインの作成元が「新規タブ」から「呼び出し元
+  セッションのプロンプトペイン」に変わった以外、`ensure`/`run`/`send`/`waitfor`/
+  `read` のインタフェースは不変)。`herdr pane close` で全ペインを閉じると
+  空になったタブも自動で消えることを確認済み。詳細は docs/workflow.md §6.1。
 - 次の候補: Phase 9b 追記で見つかった、配線修正後も残る小さな偏差
   (BPM が公称より約1.8低い、取りこぼし約1.4%)の再現性を複数回の
   再測定で確認する。Song Position Pointer 等の高度な MIDI 同期は

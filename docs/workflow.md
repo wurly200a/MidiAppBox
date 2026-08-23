@@ -222,11 +222,27 @@ pgrep -af midibox_host                          # 残留なしを確認(何も�
 
 ### 6.1 ペイン一覧(ラベル固定)
 
-全ラベルは **herdr の共有タブ 1 つ(`midiappbox-panes`)の中に 3 列 x 2 行で分割配置**
+全ラベルは **このセッション自身のタブ(プロンプトペインが属するタブ)の中に、
+プロンプトを最上段・全幅(既定で高さ 35%)、その下を 2 列 x 3 行で分割配置**
 される(`scripts/hpane.sh` が `herdr pane split`/`pane rename` でペイン単位のラベルを
 解決・作成する。タブ単位ではなくペイン単位のラベルなので `herdr tab list` では見えない
 点に注意)。`ensure`/`run`/`send`/`waitfor`/`read` の呼び出しインタフェースは
-「ラベルごとに別タブ」だった旧方式と変わらない。
+「ラベルごとに別タブ」だった旧方式・「作業ペインだけの共有タブ」だった旧方式(いずれも
+check-workflow-routine で廃止)から変わらない。
+
+```
+プロンプト(全幅、既定で高さ 35%)
+------------------------------------------------
+esp32-build   | unix-build
+esp32-monitor | zenn
+camera        | screen
+```
+
+列はプロンプトペインから down split で作った `esp32-build` を左列ルート、
+そこから right split した `unix-build` を右列ルートとし、各列内は真上のペインから
+down split して積む。プロンプトとの高さ比率は `HPANE_PROMPT_ROW_RATIO`
+(既定 0.35)で調整できる。作成後のペインサイズはユーザーが `herdr pane resize`
+等で自由に変えてよい。
 
 | ラベル | 用途 | 実行形式 |
 |---|---|---|
