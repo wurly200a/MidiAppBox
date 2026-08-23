@@ -7,11 +7,14 @@
 # 「なければ作る / あればそのまま使う」「番兵トークンで確実に完了待ち」を提供する。
 #
 # 使い方:
-#   ./scripts/hpane.sh ensure  <name>                     # ペインを解決(なければ作成)し pane_id を表示
-#   ./scripts/hpane.sh run     <name> "<cmd>" [timeout_ms] # コマンド実行→完了待ち→exit code をそのまま返す
-#   ./scripts/hpane.sh send    <name> "<cmd>"              # 実行するだけ(待たない: モニタ/カメラ等の常駐用)
-#   ./scripts/hpane.sh waitfor <name> "<match>" [timeout_ms] # 指定文字列が出るまで待つ(常駐プロセス用)
-#   ./scripts/hpane.sh read    <name> [lines]              # ペインの最近の出力を表示
+#   ./scripts/hpane.sh ensure    <name>                     # ペインを解決(なければ作成)し pane_id を表示
+#   ./scripts/hpane.sh ensure-all                           # 全ラベルを ensure し、既定レイアウトを一括で組み上げる
+#   ./scripts/hpane.sh run       <name> "<cmd>" [timeout_ms] # コマンド実行→完了待ち→exit code をそのまま返す
+#   ./scripts/hpane.sh send      <name> "<cmd>"              # 実行するだけ(待たない: モニタ/カメラ等の常駐用)
+#   ./scripts/hpane.sh waitfor   <name> "<match>" [timeout_ms] # 指定文字列が出るまで待つ(常駐プロセス用)
+#   ./scripts/hpane.sh read      <name> [lines]              # ペインの最近の出力を表示
+#   ./scripts/hpane.sh close     <name>                     # ペインを閉じる(無ければ何もしない)
+#   ./scripts/hpane.sh close-all                            # 全ラベルのペインを閉じる(プロンプトペインは残す)
 #
 # 前提: herdr 内で実行されていること (HERDR_ENV=1)。
 # 注意: herdr の pane ID は永続ではない(閉じると詰められる)。
@@ -54,10 +57,13 @@ declare -A DIRECTION_OF=(
     [screen]="down"
 )
 
+# ensure-all/close-all で回す全ラベル(表示上のレイアウト順)。
+ALL_LABELS=(esp32-build unix-build esp32-monitor zenn camera screen)
+
 usage() { grep '^#   ' "$0" | sed 's/^#   //'; exit 2; }
 
-[ $# -ge 2 ] || usage
-CMD="$1"; NAME="$2"; shift 2
+[ $# -ge 1 ] || usage
+CMD="$1"; shift
 
 # --- JSON パーサ群 -----------------------------------------------------------
 # VERIFY 済み(check-workflow, 使い捨てタブでの実地確認):
@@ -132,9 +138,42 @@ ensure_pane() {
     echo "$pane"
 }
 
+close_pane() {
+    local label="$1" pane
+    if pane=$(resolve_pane_by_label "$label"); then
+        herdr pane close "$pane" >/dev/null
+        echo "hpane: closed '$label' ($pane)"
+    else
+        echo "hpane: '$label' not open, skip" >&2
+    fi
+}
+
+# ensure-all/close-all は NAME を取らない。それ以外は NAME(第2引数)必須。
+case "$CMD" in
+  ensure-all)
+    for label in "${ALL_LABELS[@]}"; do
+        ensure_pane "$label"
+    done
+    exit 0
+    ;;
+  close-all)
+    for label in "${ALL_LABELS[@]}"; do
+        close_pane "$label"
+    done
+    exit 0
+    ;;
+esac
+
+[ $# -ge 1 ] || usage
+NAME="$1"; shift
+
 case "$CMD" in
   ensure)
     ensure_pane "$NAME"
+    ;;
+
+  close)
+    close_pane "$NAME"
     ;;
 
   run)
