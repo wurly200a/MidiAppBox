@@ -1,8 +1,50 @@
-# WASM PoC 計測結果 (Phase 4)
+# Phase 4: 計測と記録
+
+計測は実機・release 相当条件を明記(CPU 周波数、最適化レベル、interpreter 種別)。
+
+1. ホスト API 呼び出しコスト: wasm 内ループから `hostapi_now_ms` を N 回呼び、
+   `esp_cpu_get_cycle_count()` でサイクル数/回を算出。ネイティブ直呼びと比較。
+2. ジッタ: tick タスクの起床間隔と `app_tick()` 実行時間を `esp_timer_get_time()` で
+   数千サンプル収集し、min/avg/max/分布を記録。
+3. メモリ: flash 増分、WAMR プール消費、instantiate 後 free heap、
+   `wasm_runtime_dump_mem_consumption` の出力。
+4. 所見: interpreter のままで音楽アプリロジックに足りるか、AOT へ進む判断材料を書く。
+
+## Phase 4 実施記録 (2026-07-05) — 完了
+
+計測結果と所見は本ファイル末尾の「計測結果詳細」に集約(条件: -Og, 160MHz, fast-interp)。
+ヘッドライン: host→wasm 起動 15.8µs、wasm→host 越境 ~2.5〜3.7µs/回、
+100ms tick の定常ジッタ +10µs 以内、WAMR 実消費 ~27KB(プール 128KB は
+64KB へ縮小可)、interp ループ ~215 cycles/iter。
+**結論: interpreter のままロジック層には十分。AOT は信号処理を wasm に
+持ち込む段になってから。**
+
+実装メモ:
+
+- `wasm-apps/bench/`: 計測用 wasm(`bench_empty`/`bench_hostcall`)。
+  `bench_empty` は LCG 形式(`acc*1664525+i`)——単純な `acc+=i` だと LLVM が
+  閉形式(等差数列の和)に畳んでループが消えるため。
+- demo 起動時に bench が自動実行され、tick ループが最初の 1000 回の
+  起床間隔/実行時間を収集して統計をログする(常設。計測バッファ 8KB)。
+- tick 駆動は `vTaskDelay` → **`vTaskDelayUntil`(絶対時刻基準)に変更**。
+- `wasm_runtime_dump_mem_consumption` は `WAMR_ENABLE_MEMORY_PROFILING=y`
+  ビルドのみ存在(コードは `#if` ガード済み)。WAMR 2.4.0 では同フラグが
+  `-Werror=dangling-pointer` でビルド失敗するため、`src/CMakeLists.txt` で
+  WAMR コンポーネントにのみ `-Wno-dangling-pointer` を付与して回避。
+
+## 未確定・要実測事項(推測で進めない)
+
+- 初期化後の内部 SRAM 空きヒープ実測値(Phase 1 で取得)。
+- WAMR 2.4.0 component の実フットプリント(flash/RAM)と menuconfig 推奨値。
+- fast interpreter(既定, メモリ2倍・速い)と classic interpreter の選択 → Phase 1 は
+  既定で開始し、メモリが厳しければ classic を試す。
+- I2S クリック音の初回発音レイテンシ(Phase 2 で確認)。
+
+## 計測結果詳細
 
 計測日: 2026-07-05
 
-## 計測条件
+### 計測条件
 
 | 項目 | 値 |
 |---|---|
@@ -19,7 +61,7 @@
 計測値は起動ごとのシリアルログから採取。-Og かつ 160MHz なので、
 リリース最適化(-O2)や 240MHz 化でネイティブ側・WAMR とも改善余地がある。
 
-## 1. ホスト API 呼び出しコスト
+### 1. ホスト API 呼び出しコスト
 
 `bench.wasm` のループ(N=100,000)を `esp_cpu_get_cycle_count()` で外側から計測。
 
@@ -37,7 +79,7 @@
   サンプル単位(44.1kHz)で越境する設計は不可(1 サンプル 22.7 µs に対し
   呼び出しだけで 4µs超)——オーディオ生成をネイティブ側に置く方針の妥当性を裏付け。
 
-## 2. タイミングジッタ(tick 駆動)
+### 2. タイミングジッタ(tick 駆動)
 
 ホスト側 tick スレッド(pthread, prio 5)が `vTaskDelayUntil` で 100ms 周期に
 `app_tick()` を呼ぶ。起床間隔と実行時間を 1000 サンプル収集(2 回のブートで再現確認)。
@@ -57,9 +99,9 @@ LVGL 描画タスク・クリック音 I2S 出力が同時に動作している�
   周期駆動の UI/シーケンサ用途(10〜100ms 周期)には**ジッタは問題にならない**。
   1ms 未満の粒度が必要になったら esp_timer / ハードウェアタイマ駆動を検討。
 
-## 3. メモリ
+### 3. メモリ
 
-### RAM(実測)
+#### RAM(実測)
 
 | 項目 | 値 |
 |---|---|
@@ -68,7 +110,7 @@ LVGL 描画タスク・クリック音 I2S 出力が同時に動作している�
 | WAMR 静的プール(BSS) | 131,072 bytes |
 | demo モジュールロード時の malloc 消費(プール外, fast-interp の再コンパイル領域等) | ~18.7 KB |
 
-### WAMR 内部消費(`wasm_runtime_dump_mem_consumption`, MEMORY_PROFILING=y ビルド)
+#### WAMR 内部消費(`wasm_runtime_dump_mem_consumption`, MEMORY_PROFILING=y ビルド)
 
 | 項目 | 値 |
 |---|---|
@@ -85,7 +127,7 @@ LVGL 描画タスク・クリック音 I2S 出力が同時に動作している�
   プールは 64KB まで縮小可能な見込みで、その場合 free heap は 110KB 程度まで回復。
   wasm 側スタックも 8KB 割り当てに対し実使用 152B と余裕が大きい。
 
-### Flash
+#### Flash
 
 | 項目 | 値 |
 |---|---|
@@ -94,7 +136,7 @@ LVGL 描画タスク・クリック音 I2S 出力が同時に動作している�
 | アプリバイナリ: MP3 デモモード(WAMR リンクなし相当) | 769 KB(基準 741KB +28KB) |
 | hello.wasm / demo.wasm / bench.wasm | 106 / 730 / 244 bytes |
 
-## 4. 所見と次の判断材料
+### 4. 所見と次の判断材料
 
 1. **interpreter のままで音楽アプリの「ロジック層」には足りる。**
    fast-interp は ~215 cycles/ループ(ネイティブ比おそらく 20〜40 倍遅)だが、
@@ -113,7 +155,7 @@ LVGL 描画タスク・クリック音 I2S 出力が同時に動作している�
 5. 計測は -Og / 160MHz。リリース条件(-O2 / 240MHz)では全数値が改善する
    方向であり、本結果は保守側の見積もり。
 
-## 再現手順
+### 再現手順
 
 - ベンチ: `CONFIG_MIDIBOX_WASM_DEMO=y` でビルドすると起動時に bench が走り、
   約 100 秒後に jitter 統計がシリアルに出る。

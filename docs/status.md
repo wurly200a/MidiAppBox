@@ -77,11 +77,14 @@ CLAUDE.md から独立して更新する(CLAUDE.md 本体は書き換えない)�
   指していてビルド失敗する事象を発見、対処を docs/workflow.md §3 に追記して
   から再実行し解消。詳細は docs/results/check-workflow-routine.md。
 - CLAUDE.md とその周辺ドキュメントを整理(2026-08-23)。`docs/dev-log.md` を
-  `docs/results/`(フェーズ毎ファイル、`docs/prompts/` と対応)へ分割・移動、
-  `docs/poc-results.md` も `docs/results/poc-results.md` へ移動。「現在地」
-  (本ファイル)・「アーキテクチャ方針」(docs/architecture.md)・
+  `docs/results/`(フェーズ毎ファイル、`docs/prompts/` と対応)へ分割・移動。
+  「現在地」(本ファイル)・「アーキテクチャ方針」(docs/architecture.md)・
   「教訓チェックリスト」(docs/lessons.md)を CLAUDE.md から分離。herdr/hpane
-  関連の重複記載は docs/workflow.md に一本化。
+  関連の重複記載は docs/workflow.md に一本化。**追記**: 当初 `docs/poc-results.md`
+  はそのまま `docs/results/poc-results.md` へ移動しただけだったが、Phase 4
+  専用の内容なので `docs/results/phase04.md` へ統合(`## 計測結果詳細` 節)し、
+  `poc-results.md` は削除。合わせて元の `docs/results/phase01-04.md` は
+  `phase01-03.md`(Phase 1〜3)と `phase04.md`(Phase 4)に分割した。
 - 次の候補: Phase 9b 追記で見つかった、配線修正後も残る小さな偏差
   (BPM が公称より約1.8低い、取りこぼし約1.4%)の再現性を複数回の
   再測定で確認する。Song Position Pointer 等の高度な MIDI 同期は
