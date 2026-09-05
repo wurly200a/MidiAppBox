@@ -312,9 +312,29 @@ locate 後に start すると 0 に戻るのか locate 位置から始まるの�
 
 `app started` / `app stopped` が全アプリで各 1 回、残留プロセスなし。
 
-**実機**: ステップ 3 の測定と合わせて実施する(物理操作が必要なため)。
-ステップ 1 の実機回帰(上記)以降、既存経路のコードは変更していない
-(追加は新シンボルのみ)。
+**実機(2026-09-05)— 合格**(生データ:
+`captures/phase11/monitor-step2-regression.log`。ループバック配線を外して実施):
+
+| アプリ | 開始 free heap | 終了 free heap | 差分 | largest block |
+|---|---|---|---|---|
+| demo | 54052 | 54052 | +0 | 31744 |
+| bars | 54052 | 54052 | +0 | 31744 |
+| touch_demo | 54052 | 54052 | +0 | 31744 |
+| mp3player | 54052 | 54008 | −44 | 31744 |
+| clicktest | 54008 | 54008 | +0 | 31744 |
+| metronome | 54008 | 54008 | +0 | 31744 |
+| midi_loopback | 54008 | 54008 | +0 | 31744 |
+
+- **`largest block` は全アプリ 31744**。Phase 10 最終回帰・ステップ 1 と完全一致で、
+  ステップ 2 の追加(12 関数 + `seq_core` への切り出し)でも最大連続ブロックは不変。
+- free heap の水準はステップ 1 比 −472B。新 native 12 個の登録テーブル
+  (`NativeSymbol` 配列)と追加コード分で、**静的追加として想定内**。
+- **リークは 0**(mp3player の −44B のみ。9c 以前からの既知挙動)。
+- **WARN/ERROR 0 件**(起動時の `spi_flash: Detected size(16384k)...` のみ)。
+  配線を外したので `MIDI RX: ring buffer full` も出ていない。
+
+起動直後の基準値: `Audio_Init: free heap 151428 -> 104224`、
+`runtime ready ... free heap 97800`、`heap after seq init: largest block 57344`。
 
 ### 新たに判明した制約(ステップ 2 時点)
 
