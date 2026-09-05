@@ -227,6 +227,81 @@ enum {
     HOSTAPI_AUDIO_ERROR    = 4, /* play 失敗。次の play まで保持 */
 };
 
+/* ============================== transport / tempomap / seq ==============================
+ *
+ * 音楽時間軸 API(Phase 11)。設計と根拠は docs/architecture.md、
+ * 仕様は docs/hostapi-next.md を参照。
+ *
+ * tick の 2 座標:
+ *   playback tick = transport 開始からの単調増加。ループしても戻らない。
+ *                   seq_write の tick、seq_filled_until、time_us_to_tick の戻り値。
+ *   song tick     = 楽曲上の位置。ループ範囲の終端で先頭へ巻き戻る。
+ *                   transport_locate の引数、tempomap_* の at_tick、小節/拍の算出。
+ *
+ * 内部 PPQN は 960(24 で割り切れ MIDI Clock が整数 40 tick、SMF 最頻 480 の ×2)。
+ * MIDI Clock はホストが 40 tick グリッドから直接生成する。アプリは関与しない
+ * (transport_start/stop が 0xFA/0xFC を出す。hostapi_midi_send で二重に
+ *  送らないこと)。
+ *
+ * seq_write の受理契約(architecture.md §11-9):
+ *   受理は必ず先頭からの連続した n 件(プレフィックス)。残りはアプリが保持し
+ *   次回の seq_write で再送する。ホストは残りを覚えない。ただし
+ *   transport_locate / seq_flush_after / transport_stop はキューの未発火
+ *   イベントを破棄するので、その後はアプリ側の未受理分も破棄して
+ *   seq_filled_until() から供給し直すこと。
+ *
+ * キューの未発火イベント破棄で発音中ノートが鳴りっぱなしになる場合、
+ * All Notes Off はホストが自動送出しない(アプリが hostapi_midi_send で送る。
+ * architecture.md §11-8)。
+ */
+
+#define HOSTAPI_PPQN 960
+
+/* transport の状態 */
+enum {
+    HOSTAPI_TRANSPORT_STOPPED = 0,
+    HOSTAPI_TRANSPORT_PLAYING = 1,
+};
+
+/* イベントの出力先ポート */
+enum {
+    HOSTAPI_PORT_DIN_OUT  = 0, /* 物理 MIDI OUT (UART1) */
+    HOSTAPI_PORT_USB_MIDI = 1, /* 将来 */
+    HOSTAPI_PORT_SYNTH    = 2, /* 内蔵音源(将来) */
+    HOSTAPI_PORT_CLICK    = 3, /* トーンパレット(hostapi_tone_define のスロット) */
+};
+
+/* status が MIDI ステータスバイト(0x80 以上)でない場合の内部オペコード */
+enum {
+    HOSTAPI_SEQ_OP_NONE = 0,
+    HOSTAPI_SEQ_OP_TONE = 1, /* port=CLICK。param = トーンスロット (0..7) */
+    /* 将来: OP_MARKER, OP_CALLBACK, ... 追加は非破壊 */
+};
+
+/* シーケンサイベント。16 bytes, align 4。リトルエンディアン(ABI 凍結)。
+ * L0 の内部キュー要素と同一レイアウトで、境界での変換を不要にしている。 */
+typedef struct {
+    uint32_t tick;      /* 発火する playback tick(絶対) */
+    uint8_t  port;      /* HOSTAPI_PORT_* */
+    uint8_t  status;    /* MIDI ステータスバイト、または HOSTAPI_SEQ_OP_* */
+    uint8_t  data1;     /* MIDI データ 1(未使用なら 0) */
+    uint8_t  data2;     /* MIDI データ 2(未使用なら 0) */
+    uint32_t param;     /* op 依存。MIDI イベントでは 0 */
+    uint32_t _reserved; /* 常に 0。将来拡張用でサイズ変更はしない */
+} hostapi_seq_event_t;
+
+/* transport 位置。32 bytes, align 8。リトルエンディアン(ABI 凍結)。 */
+typedef struct {
+    uint64_t host_us;      /* この位置に対応するホスト時刻(µs、単調増加) */
+    uint32_t tick;         /* playback tick(単調増加) */
+    uint32_t song_tick;    /* song tick(ループで巻き戻る) */
+    uint32_t bar;          /* song_tick 基準の小節番号(0 始まり) */
+    uint32_t tempo_upq;    /* 現在有効なテンポ(µs / 4 分音符) */
+    uint16_t beat;         /* 小節内の拍(0 始まり) */
+    uint16_t tick_in_beat; /* 拍内 tick */
+    uint32_t state;        /* HOSTAPI_TRANSPORT_* */
+} hostapi_position_t;
+
 /* hostapi_tone_define の波形 (Phase 7C) */
 enum {
     HOSTAPI_WAVE_SINE = 0, /* 減衰サイン(v2 で唯一) */
@@ -259,7 +334,20 @@ enum {
     X(hostapi_tone_schedule, "(ii)i")     \
     /* midi (Phase 8b / 9a) */             \
     X(hostapi_midi_send, "(*~)i")         \
-    X(hostapi_midi_recv, "(*~)i")
+    X(hostapi_midi_recv, "(*~)i")         \
+    /* transport / tempomap / seq (Phase 11) */             \
+    X(hostapi_transport_start, "()i")                       \
+    X(hostapi_transport_stop, "()i")                        \
+    X(hostapi_transport_continue, "()i")                    \
+    X(hostapi_transport_locate, "(i)i")                     \
+    X(hostapi_transport_get_position, "(*~)i")              \
+    X(hostapi_tempomap_set_tempo, "(ii)i")                  \
+    X(hostapi_tempomap_set_meter, "(iii)i")                 \
+    X(hostapi_tempomap_set_loop, "(ii)i")                   \
+    X(hostapi_seq_write, "(*~)i")                           \
+    X(hostapi_seq_flush_after, "(i)i")                      \
+    X(hostapi_seq_filled_until, "()i")                      \
+    X(hostapi_time_us_to_tick, "(I)i")
 
 /* NativeSymbol 配列の初期化子を生成するヘルパ */
 #define HOSTAPI_SYMBOL_ENTRY(name, sig) { #name, (void*)native_##name, sig, NULL },

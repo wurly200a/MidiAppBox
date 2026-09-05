@@ -14,6 +14,7 @@
 #include "audio.hpp"
 #include "midi.hpp"
 #include "seq.hpp"
+#include "seq_core.h"
 #include "freertos/FreeRTOS.h"
 
 #include <atomic>
@@ -425,6 +426,50 @@ uint32_t native_hostapi_now_ms(wasm_exec_env_t exec_env)
     (void)exec_env;
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
+
+// ---- 音楽時間軸 API (Phase 11) ----
+// L0/L1 の実装は shared/seq_core.c(実機と Linux ホストで同一コード)。
+// ここは WAMR 境界の薄いラッパに徹する("*~" のバッファは検証済み)。
+int32_t native_hostapi_transport_start(wasm_exec_env_t e)
+{ (void)e; return seqcore_transport_start(); }
+
+int32_t native_hostapi_transport_stop(wasm_exec_env_t e)
+{ (void)e; return seqcore_transport_stop(); }
+
+int32_t native_hostapi_transport_continue(wasm_exec_env_t e)
+{ (void)e; return seqcore_transport_continue(); }
+
+int32_t native_hostapi_transport_locate(wasm_exec_env_t e, int32_t song_tick)
+{ (void)e; return seqcore_transport_locate((uint32_t)song_tick); }
+
+int32_t native_hostapi_transport_get_position(wasm_exec_env_t e, char* buf, uint32_t len)
+{ (void)e; return seqcore_transport_get_position(buf, len); }
+
+int32_t native_hostapi_tempomap_set_tempo(wasm_exec_env_t e, int32_t at_tick, int32_t upq)
+{ (void)e; return seqcore_tempomap_set_tempo((uint32_t)at_tick, (uint32_t)upq); }
+
+int32_t native_hostapi_tempomap_set_meter(wasm_exec_env_t e, int32_t at_tick,
+                                          int32_t numer, int32_t denom)
+{
+    (void)e;
+    if (numer < 0 || denom < 0) return -1;
+    return seqcore_tempomap_set_meter((uint32_t)at_tick, (uint32_t)numer, (uint32_t)denom);
+}
+
+int32_t native_hostapi_tempomap_set_loop(wasm_exec_env_t e, int32_t start, int32_t end)
+{ (void)e; return seqcore_tempomap_set_loop((uint32_t)start, (uint32_t)end); }
+
+int32_t native_hostapi_seq_write(wasm_exec_env_t e, const char* buf, uint32_t len)
+{ (void)e; return seqcore_seq_write(buf, len); }
+
+int32_t native_hostapi_seq_flush_after(wasm_exec_env_t e, int32_t tick)
+{ (void)e; return seqcore_seq_flush_after((uint32_t)tick); }
+
+int32_t native_hostapi_seq_filled_until(wasm_exec_env_t e)
+{ (void)e; return seqcore_seq_filled_until(); }
+
+int32_t native_hostapi_time_us_to_tick(wasm_exec_env_t e, int64_t us)
+{ (void)e; return seqcore_time_us_to_tick(us); }
 
 // ---- オーディオ API (Phase 6B) ----
 // audio::Mp3Player の薄いラッパ。状態はホスト側で宣言的に管理し、

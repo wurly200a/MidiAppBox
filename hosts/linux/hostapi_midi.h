@@ -27,6 +27,15 @@ void host_midi_reset(void);
 void host_midi_notify_beat_scheduled(uint32_t target_ms);
 void host_midi_notify_beat_fired(uint32_t fired_ms);
 
+/* 起動基準の単調増加 µs クロック(実機の esp_timer_get_time() 相当)。
+ * hostapi_midi_recv のタイムスタンプと同一時基であり、Phase 11 の
+ * Clock Authority(hostapi_seq.c)もこれを時刻源に使う。 */
+uint64_t host_midi_now_us(void);
+
+/* L0 のポート層(Phase 11)からの生バイト送出。native_hostapi_midi_send と違い
+ * Start/Stop の副作用を持たない(音楽時間軸は L1 が持つため再解釈しない)。 */
+void host_midi_tx_bytes(const uint8_t* bytes, size_t len);
+
 /* shared/hostapi_defs.h の X-macro が参照する native_* 実装 */
 int32_t native_hostapi_midi_send(wasm_exec_env_t exec_env, const char* bytes, uint32_t len);
 int32_t native_hostapi_midi_recv(wasm_exec_env_t exec_env, char* buf, uint32_t len);

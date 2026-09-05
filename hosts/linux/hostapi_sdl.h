@@ -36,6 +36,9 @@ void host_sdl_window_to_logical(int wx, int wy, int* lx, int* ly);
 /* 座標変換の診断情報を stdout に出す(デバッグ用) */
 void host_sdl_debug_dump_coords(int wx, int wy, int lx, int ly);
 
+/* L0 の CLICK ポート(Phase 11)からの発音。既存の即時発音経路を共有する */
+void host_click_play_slot(uint32_t slot);
+
 /* shared/hostapi_defs.h の X-macro が参照する native_* 実装 */
 void native_hostapi_draw_text(wasm_exec_env_t exec_env, int32_t x, int32_t y,
                               const char* str, uint32_t len);

@@ -11,6 +11,7 @@ idf_component_register(
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../wasm-apps/clicktest/clicktest.wasm"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../wasm-apps/metronome/metronome.wasm"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../wasm-apps/midi_loopback/midi_loopback.wasm"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../wasm-apps/seq_smoke/seq_smoke.wasm"
         "${CMAKE_CURRENT_SOURCE_DIR}/assets/test.mp3"
         "${CMAKE_CURRENT_SOURCE_DIR}/assets/tune_down.mp3"
         "${CMAKE_CURRENT_SOURCE_DIR}/assets/tune_duo.mp3"

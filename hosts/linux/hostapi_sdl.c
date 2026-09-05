@@ -29,6 +29,7 @@
 #include "font8x8_basic.h"
 #include "hostapi_defs.h"
 #include "hostapi_midi.h"
+#include "hostapi_seq.h"
 
 /* 実機と同じランドスケープ 320x240 */
 #define SCREEN_W 320
@@ -212,6 +213,9 @@ static void audio_callback(void* userdata, Uint8* stream, int len)
     }
 
     s_audio_samples += (uint64_t)frames;
+    /* Clock Authority(Phase 11)のレートマスター。実機の I2S on_sent と同型に、
+     * 再生済みフレーム数を渡す(hostapi_seq.c が受け取る)。 */
+    host_seq_on_audio((uint32_t)frames);
 }
 
 #ifdef HAVE_SDL_TTF
@@ -304,6 +308,7 @@ void host_sdl_audio_reset(void)
         SDL_UnlockAudioDevice(s_audio);
     }
     host_midi_reset(); /* MIDI Clock 生成も必ず停止する (Phase 8b 契約) */
+    host_seq_reset();  /* L0/L1 も初期状態へ (Phase 11) */
 }
 
 /* ミュージックルート相対パスの検証(実機側 hostapi.cpp と同じ規則) */
@@ -783,6 +788,14 @@ static int32_t tone_play_impl(int32_t slot)
     s_click_asap = true;
     SDL_UnlockAudioDevice(s_audio);
     return 0;
+}
+
+/* L0 の CLICK ポート(Phase 11)からの発音。既存の即時発音経路
+ * (tone_play_impl → s_click_asap → audio_callback)をそのまま共有の出口に
+ * するので、音声側の追加配線はない。 */
+void host_click_play_slot(uint32_t slot)
+{
+    (void)tone_play_impl((int32_t)slot);
 }
 
 static int32_t tone_schedule_impl(int32_t slot, int32_t time_ms)

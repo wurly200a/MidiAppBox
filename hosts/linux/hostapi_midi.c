@@ -244,6 +244,17 @@ static void midi_output_bytes(const uint8_t* bytes, size_t len)
     fprintf(stderr, "\n");
 }
 
+uint64_t host_midi_now_us(void)
+{
+    return now_us();
+}
+
+void host_midi_tx_bytes(const uint8_t* bytes, size_t len)
+{
+    if (bytes == NULL || len == 0 || len > 8) return;
+    midi_output_bytes(bytes, len);
+}
+
 static Uint32 clock_timer_cb(Uint32 interval, void* param)
 {
     (void)param;

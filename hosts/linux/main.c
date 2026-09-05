@@ -26,6 +26,7 @@
 #include "hostapi_defs.h"
 #include "hostapi_sdl.h"
 #include "hostapi_midi.h"
+#include "hostapi_seq.h"
 
 #define APP_TICK_MS 100
 #define MAX_APPS 32
@@ -285,6 +286,7 @@ int main(int argc, char** argv)
 
     if (!host_sdl_init()) return 1;
     host_midi_init();
+    host_seq_init();
 
     RuntimeInitArgs init_args;
     memset(&init_args, 0, sizeof(init_args));
@@ -398,6 +400,7 @@ int main(int argc, char** argv)
 
 out:
     wasm_runtime_destroy();
+    host_seq_shutdown();
     host_midi_shutdown();
     host_sdl_shutdown();
     return ret;

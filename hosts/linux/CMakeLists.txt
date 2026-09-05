@@ -69,7 +69,8 @@ if(NOT ALSA_FOUND)
 endif()
 
 # ---- host executable ----
-add_executable(midibox_host main.c hostapi_sdl.c hostapi_midi.c)
+add_executable(midibox_host main.c hostapi_sdl.c hostapi_midi.c hostapi_seq.c
+               ${CMAKE_CURRENT_SOURCE_DIR}/../../shared/seq_core.c)
 target_include_directories(midibox_host PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../../shared
