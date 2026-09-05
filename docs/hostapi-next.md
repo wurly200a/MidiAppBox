@@ -3,8 +3,11 @@
 対応指示書: `docs/prompts/phase10.md`。実測の出典: `docs/results/phase10.md`。
 アーキテクチャ本体: `docs/architecture-next.md`。
 
-**承認されたら、本文書の §7 のコード片を `shared/hostapi_defs.h` に取り込む。**
+**承認されたら、本文書の §8 のコード片を `shared/hostapi_defs.h` に取り込む。**
 実装は Phase 11 以降で、本フェーズには含まない。
+
+**初版レビュー(2026-08-31)の指摘は反映済み。** 決定事項の記録は
+`docs/architecture-next.md` §11 にある。
 
 ## 0. レビュー観点(最初に読むこと)
 
@@ -49,9 +52,14 @@ L0 のキューは **単調増加する playback tick** をソートキーにす
 L3 は song tick で曲構造を解釈する。ループ 1 周分の内容は、L2 が周回ごとに
 新しい playback tick で書き直す。
 
-> レビュー論点: この切り方でよいか(`architecture-next.md` §11-1)。
-> 代案は「tick をソング位置にしてループで巻き戻す」だが、L0 のソートキーが
-> 単調でなくなり、キュー実装が複雑化する。
+> **決定済み**(`architecture-next.md` §11-1)。代案「tick をソング位置にして
+> ループで巻き戻す」は、L0 のソートキーが単調でなくなりキュー実装が複雑化する
+> ため不採用。
+>
+> **この設計が意図的に放棄した性質**: 「1 小節ぶん積んでループ指定すれば
+> WASM がハングしてもホスト単独で鳴り続ける」は成立しない。アプリが止まると
+> キューイベントは horizon 分(1〜2 小節)で止まる(MIDI クロックはグリッド
+> 生成なので生き残る)。理由と判断は `architecture-next.md` §11-1 を参照。
 
 ## 3. transport
 
@@ -71,6 +79,10 @@ hostapi_transport_stop() -> 0/-1
   - 発音中のノートに対する All Notes Off はホストが自動送出しない
     (アプリが必要に応じて hostapi_midi_send で送る。App drives の原則)。
   - 既に STOPPED のときは何もせず -1。
+  - **v1 の選択: STOPPED 中はクロックを流さない。** 市販機には停止中も
+    クロックを送り続けてスレーブにテンポを追従させる流儀もあるが、v1 は
+    止める方を採る(ABI に影響しないホスト挙動。判断の記録は
+    architecture-next.md §11-7)。
 
 hostapi_transport_continue() -> 0/-1
   停止位置から再生を再開する。song tick は stop 時の値を保つ。
@@ -234,16 +246,23 @@ hostapi_seq_filled_until() -> tick
 | 既存 API | 扱い | 理由 |
 |---|---|---|
 | `hostapi_midi_send` | **残す**。ただし **Start/Stop/Continue の副作用(内部クロック生成のトリガ)は削除する** | 素の MIDI バイト送出(SysEx、即時 CC、All Notes Off)は引き続き必要。一方、副作用によるテンポ逆算が 9c の根本原因を作ったので、transport_* に一本化する |
-| `hostapi_midi_recv` | **残す**(シグネチャ・挙動とも不変) | パースはアプリの責務のまま。打刻補正を入れるかは要判断(architecture-next.md §11-4) |
-| `hostapi_click_schedule` | **非推奨化**(当面は残す) | `seq_write(port=CLICK)` に置換。既存アプリ(metronome / clicktest)の回帰を守るため、移行ステップ 4 で内部を L0 の薄いラッパに載せ替える |
-| `hostapi_tone_schedule` | **非推奨化**(同上) | 同上 |
+| `hostapi_midi_recv` | **残す**(シグネチャ不変)。ただし**タイムスタンプに線速補正を適用する**(意味の変更) | 「受信直後に打刻した時刻」→「線上の推定到着時刻」。1 バイト単独受信では補正量ゼロなのでクロック計測系(9c との比較)は無影響。根拠は architecture-next.md §8 / §11-4 |
+| `hostapi_click_schedule` | **非推奨化 → 移行ステップ 4 完了後に削除** | `seq_write(port=CLICK)` に置換。既存アプリ(metronome / clicktest)の回帰を守るため、まず移行ステップ 4 で内部を L0 の薄いラッパに載せ替え、全アプリの移植完了後に削除する。削除期限は日付ではなく「ABI を対外的に確定版として公開する時点より前」(architecture-next.md §11-3) |
+| `hostapi_tone_schedule` | **非推奨化 → 同上** | 同上 |
 | `hostapi_tone_define` / `hostapi_tone_play` | **残す** | トーンパレットの定義・即時発音は L0 の CLICK port が使う。予約だけが seq に移る |
 | `hostapi_now_ms` | **残す** | UI 用の実時間。音楽時間軸とは別系統 |
 | gfx / input / audio / fs | **変更なし** | 本改訂の対象外 |
 
 **ABI の非破壊性**: 追加は新シンボルのみ。既存シンボルのシグネチャは変更しない。
-`hostapi_midi_send` の副作用削除は挙動変更なので、移行ステップ 5 で
-midi_loopback による確認を伴って行う。
+ただし**挙動が変わるものが 2 つある**ので、いずれも移行表のステップで
+midi_loopback による確認を伴って行う:
+
+1. `hostapi_midi_send` の Start/Stop 副作用の削除(ステップ 5)。
+2. `hostapi_midi_recv` のタイムスタンプ意味変更(線速補正の適用)。
+   `shared/hostapi_defs.h` の当該記述も更新すること。補正式は
+   「イベント内のバイトが線速で連続到着した」と仮定するため、idle ギャップを
+   挟んで 1 イベントにまとめられた場合は**過補正になりうる**
+   (録音のクオンタイズが最後の砦になるため実害はない)。この前提も明記する。
 
 ## 8. shared/hostapi_defs.h への追加案(承認後に取り込むコード片)
 
