@@ -21,6 +21,15 @@ void Midi_Init();
 // 24ppqn クロック生成を開始/停止する。
 int32_t Midi_Send(const uint8_t* bytes, size_t len);
 
+// L0 のポート層(Phase 11)からの生バイト送出。Midi_Send と違い Start/Stop の
+// 副作用を持たない(音楽時間軸は L1 が持つため、ここで再解釈しない)。
+//
+// UART TX は Midi_Send と共通の短い spinlock で直列化する。複数タスクが
+// 同時に uart_write_bytes を呼ぶとバイトが交錯しうるため。len は 1..8。
+// docs/architecture.md §7 の送出規律により、呼び出し側は 1 回のメッセージを
+// 小さく(3〜4 バイト)保ち、大きなバーストは分割して渡すこと。
+void Midi_TxBytes(const uint8_t* bytes, size_t len);
+
 // 既存クリックスケジューラ(hostapi.cpp)からの通知。App 側の呼び出しとは
 // 無関係にクロック生成が停止中(Midi_Send で Start していない)なら no-op。
 //

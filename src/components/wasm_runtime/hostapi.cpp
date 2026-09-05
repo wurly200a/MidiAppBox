@@ -13,6 +13,7 @@
 #include "esp_timer.h"
 #include "audio.hpp"
 #include "midi.hpp"
+#include "seq.hpp"
 #include "freertos/FreeRTOS.h"
 
 #include <atomic>
@@ -278,6 +279,18 @@ bool tone_lookup(int32_t slot, ToneDef* out)
     if (!t.defined) return false;
     *out = t;
     return true;
+}
+
+// L0 の CLICK ポート(Phase 11)からの発音。トーンパレットはホスト API 側の
+// アプリセッション状態なので、seq コンポーネントからはコールバックで呼ばせる
+//(コンポーネント間の循環依存を避けるため)。esp_timer タスク上・ロック外で
+// 呼ばれる。既存の予約発音と同じ audio::Play_Tone(トーンキューへの投入)を
+// 共有の出口にしているので、I2S を二重に触ることはない。
+void seq_click_handler(uint32_t slot)
+{
+    ToneDef tone;
+    if (!tone_lookup((int32_t)slot, &tone)) return;
+    audio::Play_Tone(tone.freq_hz, tone.dur_ms, tone.level);
 }
 
 int32_t tone_play_impl(int32_t slot)
@@ -619,12 +632,14 @@ void hostapi_audio_reset()
     tone_table_reset(); // トーンパレットも初期状態へ (Phase 7C 契約)
     audio::Volume_adjustment(98);
     midi::Midi_Reset(); // MIDI Clock 生成も必ず停止する (Phase 8b 契約)
+    seq::Reset();       // L0/L1 も初期状態へ (Phase 11)
 }
 
 bool hostapi_register_natives()
 {
     click_timer_ensure();
     tone_table_reset();
+    seq::SetClickHandler(seq_click_handler); // L0 の CLICK ポート (Phase 11)
     if (!wasm_runtime_register_natives(
             "env", s_native_symbols,
             sizeof(s_native_symbols) / sizeof(s_native_symbols[0]))) {

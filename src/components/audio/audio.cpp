@@ -1,5 +1,6 @@
 // Includes (kept minimal since header pulls most deps)
 #include "audio.hpp"
+#include "clock_authority.hpp"
 #include "esp_log.h"
 #include "driver/i2s_std.h"
 #include <cstring>
@@ -9,6 +10,15 @@
 namespace audio {
 
 static const char* TAG = "AUDIO/MP3";
+
+// Clock Authority(Phase 11)のレートマスター。I2S TX の on_sent は
+// データ未供給時(無音)もフリーランで発火するので、サンプルカウントは
+// 途切れず単調増加する(P10-1)。ISR コンテキストなので加算のみ。
+static bool i2s_on_sent_cb(i2s_chan_handle_t, i2s_event_data_t* ev, void*)
+{
+    clockauth::OnSent(ev ? ev->size : 0);
+    return false;
+}
 
 // Global player instance for C wrappers
 static Mp3Player* g_player = nullptr;
@@ -86,6 +96,13 @@ bool Mp3Player::ensure_i2s(uint32_t rate_hz, uint8_t bits, bool stereo) noexcept
         ESP_LOGE(TAG, "i2s_channel_init_std_mode failed");
         return false;
     }
+    // Clock Authority 用の打刻コールバックは enable より前に登録する(P10-1)
+    i2s_event_callbacks_t cbs = {};
+    cbs.on_sent = i2s_on_sent_cb;
+    if (i2s_channel_register_event_callback(tx_, &cbs, nullptr) != ESP_OK) {
+        ESP_LOGW(TAG, "i2s_channel_register_event_callback failed");
+    }
+    clockauth::OnFormatChanged(rate_hz, bits, stereo);
     if (i2s_channel_enable(tx_) != ESP_OK) {
         ESP_LOGE(TAG, "i2s_channel_enable failed");
         return false;
@@ -215,6 +232,10 @@ bool Mp3Player::reconfig_rate(uint32_t rate_hz, uint32_t bits_cfg, i2s_slot_mode
     if (i2s_channel_disable(tx_) != ESP_OK) return false;
     if (i2s_channel_reconfig_std_clock(tx_, &std_cfg.clk_cfg) != ESP_OK) return false;
     if (i2s_channel_reconfig_std_slot(tx_, &std_cfg.slot_cfg) != ESP_OK) return false;
+    // レート切替 = Clock Authority のアンカー張り替え + 換算係数の切替
+    // (再構成中は on_sent が止まるが、音楽時間軸は esp_timer 外挿で連続する。
+    //  実機は I2S と esp_timer が同一水晶なので外挿誤差は実質ゼロ。§3)
+    clockauth::OnFormatChanged(rate_hz, bits, stereo);
     if (i2s_channel_enable(tx_) != ESP_OK) return false;
     cur_rate_ = rate_hz; cur_bits_ = bits; cur_stereo_ = stereo;
     return true;

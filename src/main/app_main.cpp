@@ -5,12 +5,15 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 
 #include "power_key.hpp"
 #include "display.hpp"
 #include "touch.hpp"
 #include "audio.hpp"
 #include "midi.hpp"
+#include "clock_authority.hpp"
+#include "seq.hpp"
 #include "wasm_runtime.hpp"
 #include "hostapi.hpp"
 #include "launcher.hpp"
@@ -44,6 +47,9 @@ extern "C" void app_main()
     static Touch touch;
     touch.init(disp.lvgl_get_disp());
 
+    // Clock Authority(Phase 11)。I2S 初期化より前にアンカーを初期化しておく
+    clockauth::Init();
+
     // hostapi_audio_* 用のフル初期化(esp-audio-player タスク起動、実測 ~47KB)
     const size_t heap_before_audio = esp_get_free_heap_size();
     audio::Audio_Init();
@@ -53,6 +59,15 @@ extern "C" void app_main()
 
     // MIDI OUT の常設初期化(Phase 8a で確認済みの UART1 設定。起動時1回のみ)
     midi::Midi_Init();
+
+    // L0/L1(音楽時間軸)。Phase 11 ステップ 1 では誰からも呼ばれない
+    seq::Init();
+#ifdef PHASE11_L0_SELFTEST
+    seq::SelfTest();
+#endif
+    ESP_LOGI(TAG, "heap after seq init: free %u, largest block %u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
     if (!wasmrt::runtime_init()) {
         ESP_LOGE(TAG, "WASM runtime init failed");

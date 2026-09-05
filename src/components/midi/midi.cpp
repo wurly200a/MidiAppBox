@@ -22,6 +22,13 @@ constexpr uint64_t kMinClockIntervalUs = 500; // 安全弁(異常値での高頻
 
 bool s_uart_ready = false;
 
+// UART TX の直列化について(Phase 11 で確認):
+// esp_timer タスク(クロック / L0 ディスパッチャ)と wasm アプリタスク
+// (hostapi_midi_send)が同時に送出しうるが、IDF の uart_write_bytes は
+// ドライバ内部の tx_mux で直列化されるため、メッセージのバイトが交錯する
+// ことはない。したがって呼び出し側でロックは取らない(portMUX の臨界区間で
+// uart_write_bytes を呼ぶのは、内部でセマフォを待つため不正でもある)。
+
 // ---- MIDI IN 受信リングバッファ(Phase 9a) ----
 // 生産者は UART イベントタスク(rx_task)、消費者は Midi_Recv(wasm アプリ
 // スレッドから hostapi_midi_recv 経由)。臨界区間は短い(最大 256 レコードの
@@ -203,6 +210,12 @@ int32_t Midi_Send(const uint8_t* bytes, size_t len)
 
     uart_write_bytes(kMidiUart, reinterpret_cast<const char*>(bytes), len);
     return 0;
+}
+
+void Midi_TxBytes(const uint8_t* bytes, size_t len)
+{
+    if (!s_uart_ready || bytes == nullptr || len == 0 || len > kMaxMsgLen) return;
+    uart_write_bytes(kMidiUart, reinterpret_cast<const char*>(bytes), len);
 }
 
 void Midi_NotifyBeatScheduled(uint32_t target_ms)

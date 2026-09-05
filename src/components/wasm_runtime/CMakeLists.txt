@@ -15,6 +15,6 @@ idf_component_register(
         "${CMAKE_CURRENT_SOURCE_DIR}/assets/tune_down.mp3"
         "${CMAKE_CURRENT_SOURCE_DIR}/assets/tune_duo.mp3"
     PRIV_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../../../shared"
-    PRIV_REQUIRES esp_timer audio midi storage
+    PRIV_REQUIRES esp_timer audio midi seq storage
 )
 target_compile_options(${COMPONENT_LIB} PRIVATE -std=gnu++17)
