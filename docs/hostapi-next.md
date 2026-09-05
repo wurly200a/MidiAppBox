@@ -1,13 +1,13 @@
 # Host API 仕様案 — 音楽時間軸 API(Phase 10 成果物 / **未承認ドラフト**)
 
 対応指示書: `docs/prompts/phase10.md`。実測の出典: `docs/results/phase10.md`。
-アーキテクチャ本体: `docs/architecture-next.md`。
+アーキテクチャ本体: `docs/architecture.md`。
 
-**承認されたら、本文書の §8 のコード片を `shared/hostapi_defs.h` に取り込む。**
-実装は Phase 11 以降で、本フェーズには含まない。
+**本仕様は 2026-09-05 に承認済み。** ただし Phase 10 のゲート
+「本フェーズでは Host API / ABI を変更しない」に従い、**§8 のコード片を
+`shared/hostapi_defs.h` へ取り込むのは移行ステップ 2(Phase 11)で行う。**
 
-**初版レビュー(2026-08-31)の指摘は反映済み。** 決定事項の記録は
-`docs/architecture-next.md` §11 にある。
+設計判断の記録は `docs/architecture.md` §11 にある。
 
 ## 0. レビュー観点(最初に読むこと)
 
@@ -52,14 +52,14 @@ L0 のキューは **単調増加する playback tick** をソートキーにす
 L3 は song tick で曲構造を解釈する。ループ 1 周分の内容は、L2 が周回ごとに
 新しい playback tick で書き直す。
 
-> **決定済み**(`architecture-next.md` §11-1)。代案「tick をソング位置にして
+> **決定済み**(`docs/architecture.md` §11-1)。代案「tick をソング位置にして
 > ループで巻き戻す」は、L0 のソートキーが単調でなくなりキュー実装が複雑化する
 > ため不採用。
 >
 > **この設計が意図的に放棄した性質**: 「1 小節ぶん積んでループ指定すれば
 > WASM がハングしてもホスト単独で鳴り続ける」は成立しない。アプリが止まると
 > キューイベントは horizon 分(1〜2 小節)で止まる(MIDI クロックはグリッド
-> 生成なので生き残る)。理由と判断は `architecture-next.md` §11-1 を参照。
+> 生成なので生き残る)。理由と判断は `docs/architecture.md` §11-1 を参照。
 
 ## 3. transport
 
@@ -82,7 +82,7 @@ hostapi_transport_stop() -> 0/-1
   - **v1 の選択: STOPPED 中はクロックを流さない。** 市販機には停止中も
     クロックを送り続けてスレーブにテンポを追従させる流儀もあるが、v1 は
     止める方を採る(ABI に影響しないホスト挙動。判断の記録は
-    architecture-next.md §11-7)。
+    architecture.md §11-7)。
 
 hostapi_transport_continue() -> 0/-1
   停止位置から再生を再開する。song tick は stop 時の値を保つ。
@@ -142,7 +142,7 @@ hostapi_seq_write(buf_ptr, buf_len) -> n
     発火する(取りこぼしよりは遅延を選ぶ)。
   - 同一 tick 内の順序は、この関数に書かれた順を保つ。
   - buf_len / 16 件を上限に読む。端数バイトは無視。
-  - キュー深さは 256 件(根拠は architecture-next.md §9)。
+  - キュー深さは 256 件(根拠は architecture.md §9)。
   - L2 は毎 tick 「filled_until() < now + horizon なら書き足す」を回すだけでよい。
 
 hostapi_seq_flush_after(tick) -> n
@@ -200,7 +200,7 @@ hostapi_seq_filled_until() -> tick
 | 実現内容 | 使う API |
 |---|---|
 | SMF パース | **L3 の WASM 内**(ホスト API 不要) |
-| 分解能変換 | PPQN 480 → 960 は ×2(無損失。architecture-next.md §4) |
+| 分解能変換 | PPQN 480 → 960 は ×2(無損失。architecture.md §4) |
 | set tempo メタ | `tempomap_set_tempo(at_tick, upq)` — SMF と同じ µs/quarter 単位なので**変換不要** |
 | time signature メタ | `tempomap_set_meter(at_tick, n, d)` |
 | ノート・CC・PC | `seq_write` |
@@ -221,7 +221,7 @@ hostapi_seq_filled_until() -> tick
 | 録音中の位置表示 | `transport_get_position()` |
 
 **語彙の追加なし。** `time_us_to_tick` と `seq_flush_after` はこの要件のためにある。
-受信打刻の精度限界(最大 ≈1.3ms、architecture-next.md §8)はクオンタイズ設計で吸収する。
+受信打刻の精度限界(最大 ≈1.3ms、architecture.md §8)はクオンタイズ設計で吸収する。
 
 ### 要件 5: ドラムマシン(内蔵音源 port)
 
@@ -246,8 +246,8 @@ hostapi_seq_filled_until() -> tick
 | 既存 API | 扱い | 理由 |
 |---|---|---|
 | `hostapi_midi_send` | **残す**。ただし **Start/Stop/Continue の副作用(内部クロック生成のトリガ)は削除する** | 素の MIDI バイト送出(SysEx、即時 CC、All Notes Off)は引き続き必要。一方、副作用によるテンポ逆算が 9c の根本原因を作ったので、transport_* に一本化する |
-| `hostapi_midi_recv` | **残す**(シグネチャ不変)。ただし**タイムスタンプに線速補正を適用する**(意味の変更) | 「受信直後に打刻した時刻」→「線上の推定到着時刻」。1 バイト単独受信では補正量ゼロなのでクロック計測系(9c との比較)は無影響。根拠は architecture-next.md §8 / §11-4 |
-| `hostapi_click_schedule` | **非推奨化 → 移行ステップ 4 完了後に削除** | `seq_write(port=CLICK)` に置換。既存アプリ(metronome / clicktest)の回帰を守るため、まず移行ステップ 4 で内部を L0 の薄いラッパに載せ替え、全アプリの移植完了後に削除する。削除期限は日付ではなく「ABI を対外的に確定版として公開する時点より前」(architecture-next.md §11-3) |
+| `hostapi_midi_recv` | **残す**(シグネチャ不変)。ただし**タイムスタンプに線速補正を適用する**(意味の変更) | 「受信直後に打刻した時刻」→「線上の推定到着時刻」。1 バイト単独受信では補正量ゼロなのでクロック計測系(9c との比較)は無影響。根拠は architecture.md §8 / §11-4 |
+| `hostapi_click_schedule` | **非推奨化 → 移行ステップ 4 完了後に削除** | `seq_write(port=CLICK)` に置換。既存アプリ(metronome / clicktest)の回帰を守るため、まず移行ステップ 4 で内部を L0 の薄いラッパに載せ替え、全アプリの移植完了後に削除する。削除期限は日付ではなく「ABI を対外的に確定版として公開する時点より前」(architecture.md §11-3) |
 | `hostapi_tone_schedule` | **非推奨化 → 同上** | 同上 |
 | `hostapi_tone_define` / `hostapi_tone_play` | **残す** | トーンパレットの定義・即時発音は L0 の CLICK port が使う。予約だけが seq に移る |
 | `hostapi_now_ms` | **残す** | UI 用の実時間。音楽時間軸とは別系統 |
@@ -269,7 +269,7 @@ midi_loopback による確認を伴って行う:
 ```c
 /* ============================== transport / tempomap / seq ==============================
  *
- * 音楽時間軸 API(Phase 11 以降)。設計と根拠は docs/architecture-next.md 参照。
+ * 音楽時間軸 API(Phase 11 以降)。設計と根拠は docs/architecture.md 参照。
  *
  * tick の 2 座標:
  *   playback tick = transport 開始からの単調増加。ループしても戻らない。
