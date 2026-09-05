@@ -62,7 +62,7 @@ extern "C" void app_main()
 
     // L0/L1(音楽時間軸)。Phase 11 ステップ 1 では誰からも呼ばれない
     seq::Init();
-#ifdef PHASE11_L0_SELFTEST
+#ifdef SEQCORE_SELFTEST
     seq::SelfTest();
 #endif
     ESP_LOGI(TAG, "heap after seq init: free %u, largest block %u",

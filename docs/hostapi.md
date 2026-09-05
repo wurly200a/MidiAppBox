@@ -1,13 +1,16 @@
-# Host API 仕様案 — 音楽時間軸 API(Phase 10 成果物 / **未承認ドラフト**)
+# Host API 仕様 — 音楽時間軸 API
 
-対応指示書: `docs/prompts/phase10.md`。実測の出典: `docs/results/phase10.md`。
-アーキテクチャ本体: `docs/architecture.md`。
-
-**本仕様は 2026-09-05 に承認済み。** ただし Phase 10 のゲート
-「本フェーズでは Host API / ABI を変更しない」に従い、**§8 のコード片を
-`shared/hostapi_defs.h` へ取り込むのは移行ステップ 2(Phase 11)で行う。**
-
+設計の出自: `docs/prompts/phase10.md`(調査)/ `docs/prompts/phase11.md`(実装)。
+実測の出典: `docs/results/phase10.md`。アーキテクチャ本体: `docs/architecture.md`。
 設計判断の記録は `docs/architecture.md` §11 にある。
+
+**本仕様は 2026-09-05 に確定し、Phase 11 の移行ステップ 2 で実装済みである**
+(実機 `src/components/seq/` + Linux `hosts/linux/hostapi_seq.c`、ロジック本体は
+両ホスト共通の `shared/seq_core.c`)。**12 関数すべてを実機・Linux 双方で検証済み**
+(検証表は `docs/results/phase11.md`)。
+
+> **宣言の実体は `shared/hostapi_defs.h` にある。** 型・enum・シグネチャを変更する
+> ときはそちらが正で、本書は仕様と根拠(なぜその語彙なのか)を記述する。
 
 ## 0. レビュー観点(最初に読むこと)
 
@@ -96,7 +99,8 @@ hostapi_transport_continue() -> 0/-1
 
 hostapi_transport_locate(song_tick) -> 0/-1
   song 位置を移動する。
-  - STOPPED 中: 次の start/continue の開始位置になる。
+  - STOPPED 中: 次の continue の開始位置になる(transport_start は常に
+    song tick 0 から始まるので影響しない。MIDI の慣行に合わせている)。
   - PLAYING 中: 即座にジャンプする。L0 の未発火イベントは破棄され
     (移動前の位置に対する予約なので)、L2 が新しい位置から供給し直す。
     アプリは locate 後に、保持している未受理分(PENDING、§5)を破棄したうえで
@@ -289,85 +293,23 @@ midi_loopback による確認を伴って行う:
    挟んで 1 イベントにまとめられた場合は**過補正になりうる**
    (録音のクオンタイズが最後の砦になるため実害はない)。この前提も明記する。
 
-## 8. shared/hostapi_defs.h への追加案(承認後に取り込むコード片)
+## 8. 宣言の実体
 
-```c
-/* ============================== transport / tempomap / seq ==============================
- *
- * 音楽時間軸 API(Phase 11 以降)。設計と根拠は docs/architecture.md 参照。
- *
- * tick の 2 座標:
- *   playback tick = transport 開始からの単調増加。ループしても戻らない。
- *                   seq_write の tick、seq_filled_until、time_us_to_tick の戻り値。
- *   song tick     = 楽曲上の位置。ループ範囲の終端で先頭へ巻き戻る。
- *                   transport_locate の引数、tempomap_* の at_tick、小節/拍の算出。
- *
- * 内部 PPQN は 960(24 で割り切れ MIDI Clock が整数 40 tick、SMF 最頻 480 の ×2)。
- * MIDI Clock はホストが 40 tick グリッドから直接生成する。アプリは関与しない。
- */
+型・enum・シンボル表(`HOSTAPI_NATIVE_SYMBOLS`)の実体は
+**`shared/hostapi_defs.h`** にある(Phase 11 の移行ステップ 2 で取り込み済み)。
+本書はそれを重複させない。参照すべき定義:
 
-#define HOSTAPI_PPQN 960
+| 定義 | 内容 |
+|---|---|
+| `HOSTAPI_PPQN` | 内部 PPQN = 960 |
+| `HOSTAPI_TRANSPORT_*` | transport 状態(STOPPED / PLAYING) |
+| `HOSTAPI_PORT_*` | 出力先ポート(DIN_OUT / USB_MIDI / SYNTH / CLICK) |
+| `HOSTAPI_SEQ_OP_*` | status が MIDI ステータスバイトでない場合のオペコード |
+| `hostapi_seq_event_t` | シーケンサイベント。16 bytes(ABI 凍結) |
+| `hostapi_position_t` | transport 位置。32 bytes(ABI 凍結) |
 
-/* transport の状態 */
-enum {
-    HOSTAPI_TRANSPORT_STOPPED = 0,
-    HOSTAPI_TRANSPORT_PLAYING = 1,
-};
-
-/* イベントの出力先ポート */
-enum {
-    HOSTAPI_PORT_DIN_OUT  = 0, /* 物理 MIDI OUT (UART1) */
-    HOSTAPI_PORT_USB_MIDI = 1, /* 将来 */
-    HOSTAPI_PORT_SYNTH    = 2, /* 内蔵音源(将来) */
-    HOSTAPI_PORT_CLICK    = 3, /* トーンパレット(hostapi_tone_define のスロット) */
-};
-
-/* status が MIDI ステータスバイト(0x80 以上)でない場合の内部オペコード */
-enum {
-    HOSTAPI_SEQ_OP_NONE = 0,
-    HOSTAPI_SEQ_OP_TONE = 1, /* port=CLICK。param = トーンスロット (0..7) */
-    /* 将来: OP_MARKER, OP_CALLBACK, ... 追加は非破壊 */
-};
-
-/* シーケンサイベント。16 bytes, align 4。リトルエンディアン(ABI 凍結)。
- * L0 の内部キュー要素と同一レイアウトで、境界での変換を不要にしている。 */
-typedef struct {
-    uint32_t tick;      /* 発火する playback tick(絶対) */
-    uint8_t  port;      /* HOSTAPI_PORT_* */
-    uint8_t  status;    /* MIDI ステータスバイト、または HOSTAPI_SEQ_OP_* */
-    uint8_t  data1;     /* MIDI データ 1(未使用なら 0) */
-    uint8_t  data2;     /* MIDI データ 2(未使用なら 0) */
-    uint32_t param;     /* op 依存。MIDI イベントでは 0 */
-    uint32_t _reserved; /* 常に 0。将来拡張用でサイズ変更はしない */
-} hostapi_seq_event_t;
-
-/* transport 位置。32 bytes, align 8。リトルエンディアン(ABI 凍結)。 */
-typedef struct {
-    uint64_t host_us;      /* この位置に対応するホスト時刻(µs、単調増加) */
-    uint32_t tick;         /* playback tick(単調増加) */
-    uint32_t song_tick;    /* song tick(ループで巻き戻る) */
-    uint32_t bar;          /* song_tick 基準の小節番号(0 始まり) */
-    uint32_t tempo_upq;    /* 現在有効なテンポ(µs / 4 分音符) */
-    uint16_t beat;         /* 小節内の拍(0 始まり) */
-    uint16_t tick_in_beat; /* 拍内 tick */
-    uint32_t state;        /* HOSTAPI_TRANSPORT_* */
-} hostapi_position_t;
-
-/* HOSTAPI_NATIVE_SYMBOLS(X) へ追記する分 */
-    /* transport / tempomap / seq (Phase 11) */             \
-    X(hostapi_transport_start, "()i")                       \
-    X(hostapi_transport_stop, "()i")                        \
-    X(hostapi_transport_continue, "()i")                    \
-    X(hostapi_transport_locate, "(i)i")                     \
-    X(hostapi_transport_get_position, "(*~)i")              \
-    X(hostapi_tempomap_set_tempo, "(ii)i")                  \
-    X(hostapi_tempomap_set_meter, "(iii)i")                 \
-    X(hostapi_tempomap_set_loop, "(ii)i")                   \
-    X(hostapi_seq_write, "(*~)i")                           \
-    X(hostapi_seq_flush_after, "(i)i")                      \
-    X(hostapi_seq_filled_until, "()i")                      \
-    X(hostapi_time_us_to_tick, "(I)i")
-```
+サイズは `shared/seq_core.c` の `_Static_assert` で凍結してある。
+L0 の内部キュー要素は `hostapi_seq_event_t` そのもので、境界での変換はない(§6)。
 
 ## 9. time_us_to_tick
 

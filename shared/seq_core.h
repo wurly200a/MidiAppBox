@@ -1,7 +1,7 @@
 #pragma once
 /*
  * L0 / L1 コア(移植可能な C 実装)。Phase 11。
- * 設計は docs/architecture.md §4〜§7 / §9、仕様は docs/hostapi-next.md。
+ * 設計は docs/architecture.md §4〜§7 / §9、仕様は docs/hostapi.md。
  *
  * 実機ホストと Linux ホストが**同一のコード**を使う。プラットフォーム依存
  * (時刻源・排他・タイマ・ポート出力)はすべて seqcore_hooks_t に外出しして
@@ -71,7 +71,7 @@ void seqcore_reset(void);
 /* タイマ発火時にホストが呼ぶ(ディスパッチャ本体) */
 void seqcore_dispatch(void);
 
-/* ---- L1: transport(docs/hostapi-next.md §3)---- */
+/* ---- L1: transport(docs/hostapi.md §3)---- */
 int32_t seqcore_transport_start(void);
 int32_t seqcore_transport_stop(void);
 int32_t seqcore_transport_continue(void);
@@ -94,7 +94,9 @@ int32_t seqcore_seq_filled_until(void);
 int32_t seqcore_time_us_to_tick(int64_t us);
 
 /* 自己検査(キューの tick 順・安定順序・満杯時の受理数・flush_after の件数)。
- * 失敗件数を返す(0 = PASS)。呼び出すとキューと transport 状態は初期化される */
+ * 失敗件数を返す(0 = PASS)。呼び出すとキューと transport 状態は初期化される。
+ * 恒久の opt-in テストで、呼ばなければ内部の作業バッファごとリンカに落ちる。
+ * ホスト側はビルド時に SEQCORE_SELFTEST を定義して起動時に呼ぶ。 */
 int seqcore_selftest(void);
 
 #ifdef __cplusplus

@@ -2,11 +2,17 @@
 
 Phase 10(`docs/prompts/phase10.md`)の実測調査と初版レビューを経て、
 **2026-09-05 に確定**した方針。実測値の出典は `docs/results/phase10.md`。
-Host API の仕様は `docs/hostapi-next.md`。
+Host API の仕様は `docs/hostapi.md`。
 
-**実装状況**: 本文書は設計であり、L0/L1 の実装は Phase 11 以降。現行コードは
-まだ §1 に挙げた 3 つの問題を抱えた状態にある(移行順序は §10、Host API の
-`shared/hostapi_defs.h` への反映は移行ステップ 2)。
+**実装状況**(2026-09-06): 移行表(§10)の**ステップ 1〜2 が完了**している。
+L0/L1 は実装済み(ロジック本体は両ホスト共通の `shared/seq_core.c`、
+プラットフォーム束ねは実機 `src/components/seq/` と Linux
+`hosts/linux/hostapi_seq.c`)、Host API の 12 関数も `shared/hostapi_defs.h` に
+取り込み済みで、実機・Linux 双方で検証済み(`docs/results/phase11.md`)。
+
+ただし**既存アプリはまだ新 API を使っておらず**、§1 に挙げた 3 つの問題は
+現行の経路(`hostapi_midi_send` の副作用 + `Midi_NotifyBeat*` によるテンポ逆算)に
+残ったままである。その解消はステップ 3 以降(Phase 12〜)。
 
 ## 0. 設計の検証観点(最初に読むこと)
 
@@ -15,7 +21,7 @@ Host API の仕様は `docs/hostapi-next.md`。
 層を正しく切れていれば、5 つのアプリ要件(高精度メトロノーム / 楽曲メトロノーム /
 SMF インポート / 2trk シーケンサー+録音 / ドラムマシン)をすべて通しても、
 Host API の語彙は増えないはずである。増えるなら層の切り方が間違っている。
-検証結果は `docs/hostapi-next.md` の「アプリ要件突き合わせ表」にある。
+検証結果は `docs/hostapi.md` の「アプリ要件突き合わせ表」にある。
 **5 要件すべてを通しても語彙は増えないことを確認済み。**
 
 個々の設計判断がなぜその形に落ち着いたか(および意図的に放棄した性質)は
@@ -328,9 +334,9 @@ MIDI クロックはグリッドから直接生成するため**キューを消�
 
 | # | ステップ | 完了条件 |
 |---|---|---|
-| 1 | L0/L1 を native に実装(既存経路と並存、まだ誰も使わない) | ビルドが通り、既存アプリの挙動が不変。static 4KB 追加後も WASM 起動 OK(largest free block 確認) |
-| 2 | Host API 追加(`transport_*` / `tempomap_*` / `seq_*` / `time_us_to_tick`) | 既存 API のシグネチャ・挙動は不変。Linux ホストにも同時実装 |
-| 3 | **metronome を新 API で書き直す** | midi_loopback の E1 統計で 9c 実測と前後比較。外れ値 0・BPM 単峰を確認 |
+| 1 | L0/L1 を native に実装(既存経路と並存、まだ誰も使わない) | **完了 2026-09-05**。静的追加 4.6KB、largest free block は 31744 で Phase 10 と一致、既存 7 アプリ回帰なし(`docs/results/phase11.md`) |
+| 2 | Host API 追加(`transport_*` / `tempomap_*` / `seq_*` / `time_us_to_tick`) | **完了 2026-09-06**。12 関数を実機・Linux 双方で検証済み。ロジックは両ホスト共通の `shared/seq_core.c`。既存 API のシグネチャ・挙動は不変(`docs/results/phase11.md`) |
+| 3 | **metronome を新 API で書き直す** | **Phase 12 へ移管**(2026-09-06)。実機は WASM アプリを同時に 1 つしか動かせず「metronome を動かしながら midi_loopback の E1 で測る」が成立しないため、旧版との前後比較ではなく**絶対値目標**(欠落 0 / clocks÷expected = 100% / BPM 単峰 / 平均間隔 20833µs)を達成条件とする。metronome は別ディレクトリを作らず上書きで書き直す |
 | 4 | 既存クリックスケジューラを L0 経由に置換(`hostapi_click_schedule` / `hostapi_tone_schedule` を L0 の薄いラッパにする) | clicktest / metronome(旧版)の回帰なし。内部だけが切り替わる |
 | 4b | **ステップ 4 完了後、`hostapi_click_schedule` / `hostapi_tone_schedule` を削除する** | 全アプリが `seq_write` へ移植済みであること。削除期限は日付ではなく**「ABI を対外的に確定版として公開する時点より前」**(§11-3) |
 | 5 | `hostapi_midi_send` の Start/Stop 副作用(クロック生成トリガ)を削除 | テンポの二重管理が消える。midi_loopback で確認 |
@@ -449,7 +455,7 @@ Phase 11 の対象アプリは metronome(CLICK ポートのみ、トーンは固
 ### 11-9. `seq_write` の部分受理 — **プレフィックス受理 + アプリが残りを保持する契約で確定**
 
 決定: ホストは先頭から連続した n 件のみを受理し、**残りはアプリが保持して次回の
-`seq_write` で再送する**(`docs/hostapi-next.md` §5 / §10)。
+`seq_write` で再送する**(`docs/hostapi.md` §5 / §10)。
 
 代案 (b)「全件受理か 0 か(アトミック)」を採らなかった理由:
 
@@ -469,7 +475,7 @@ Phase 11 の対象アプリは metronome(CLICK ポートのみ、トーンは固
 代案 (c)「イベントにアトミックグループの印を付ける」は、ホストがグループ境界を
 解釈することになり L0 に音楽的意味が漏れるため不採用。
 
-`docs/hostapi-next.md` §10 の実装イメージにあった `if n == 0 { break; }` は、
+`docs/hostapi.md` §10 の実装イメージにあった `if n == 0 { break; }` は、
 0 < n < 件数のときに残りを捨てる誤りだったので修正した(この誤りが飽和時の
 note-off 消失を生んでいた)。あわせて、キューの未発火イベントを破棄する操作
 (`transport_locate` / `seq_flush_after` / `transport_stop`)の後はアプリ側の

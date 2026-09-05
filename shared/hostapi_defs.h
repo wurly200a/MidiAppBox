@@ -230,7 +230,7 @@ enum {
 /* ============================== transport / tempomap / seq ==============================
  *
  * 音楽時間軸 API(Phase 11)。設計と根拠は docs/architecture.md、
- * 仕様は docs/hostapi-next.md を参照。
+ * 仕様は docs/hostapi.md を参照。
  *
  * tick の 2 座標:
  *   playback tick = transport 開始からの単調増加。ループしても戻らない。

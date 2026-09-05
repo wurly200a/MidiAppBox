@@ -78,7 +78,7 @@ void Init()
 
 void Reset() { seqcore_reset(); }
 
-#ifdef PHASE11_L0_SELFTEST
+#ifdef SEQCORE_SELFTEST
 void SelfTest()
 {
     const int fails = seqcore_selftest();

@@ -1,7 +1,7 @@
 # Phase 11 実施記録 — 新アーキテクチャの実装(移行ステップ 1〜3)
 
 対応する指示書: `docs/prompts/phase11.md`
-設計の正本: `docs/architecture.md`(§0〜§12)、`docs/hostapi-next.md`
+設計の正本: `docs/architecture.md`(§0〜§12)、`docs/hostapi.md`
 Phase 10 の実測前提: `docs/results/phase10.md`
 
 生データ: `captures/phase11/`(.gitignore 対象)
@@ -15,7 +15,7 @@ Phase 10 の実測前提: `docs/results/phase10.md`
 ### 0-1. `seq_write` の部分受理 — **(a) プレフィックス受理 + アプリが残りを保持**
 
 決定内容と根拠は `docs/architecture.md` §11-9、契約本文は
-`docs/hostapi-next.md` §5(`seq_write` / `seq_flush_after`)と §10(L2 実装イメージ)。
+`docs/hostapi.md` §5(`seq_write` / `seq_flush_after`)と §10(L2 実装イメージ)。
 
 要件 1〜5 との突き合わせ(語彙が増えないかの検証):
 
@@ -194,7 +194,7 @@ L0/L1 のロジックを移植可能な C に切り出し、両ホストが同�
 Phase A(ブラウザホスト)への移植点でもあり、**Clock Authority の抽象が
 実機都合に引きずられていない**ことの実地確認になっている。
 
-`shared/hostapi_defs.h` には `docs/hostapi-next.md` §8 のコード片を取り込んだ
+`shared/hostapi_defs.h` には `docs/hostapi.md` §8 のコード片を取り込んだ
 (`HOSTAPI_PPQN`、transport 状態 / ポート / オペコードの enum、
 `hostapi_seq_event_t`(16B)、`hostapi_position_t`(32B)、
 `HOSTAPI_NATIVE_SYMBOLS` への 12 関数の追記)。サイズは `seq_core.c` の
@@ -257,29 +257,55 @@ Linux の送出時刻で σ33µs と安定しており、**送信ジッタでは
 > このバッチングは発生しない(9c / P10-3 の測定条件と同じ)。ここで見えた
 > ±1.2ms を回帰と取り違えないこと。
 
-### 12 関数のカバレッジ(正直な現状)
+### 12 関数の検証表(最終)— **全 12 関数を実機・Linux 双方で検証済み**
 
-| 関数 | 実機 | Linux | 確認方法 |
+`wasm-apps/seq_smoke/` を自動一巡するテストアプリに拡張し、**同一の `.wasm`** を
+実機と Linux ホストで走らせた。アプリが自分で合否を判定し、8 個のチェック結果を
+ビットで持つ(画面表示 + CC#119/#120 での外部出力)。
+
+| 関数 | 確認方法 | 実機 | Linux |
 |---|---|---|---|
-| `transport_start` | ✔ | ✔ | 0xFA + 24ppqn グリッド開始 |
-| `transport_stop` | ✔ | ✔ | 0xFC + クロック停止 |
-| `transport_get_position` | ✔ | ✔ | bar/beat/tick/upq の表示、供給ループの駆動 |
-| `tempomap_set_tempo` | ✔ | ✔ | PLAYING 中の 120→180 切替(積み直しなし) |
-| `tempomap_set_meter` | ✔ | ✔ | 4/4 の bar/beat が正しい |
-| `seq_write` | ✔ | ✔ | CLICK 発音 + DIN_OUT の Note On/Off、プレフィックス受理 |
-| `seq_filled_until` | ✔ | ✔ | 供給ループの停止条件 |
-| `seq_flush_after` | (自己検査) | (自己検査) | 件数・残存 tick を assert |
-| `transport_continue` | **未** | **未** | 実装のみ |
-| `transport_locate` | **未** | **未** | 実装のみ |
-| `tempomap_set_loop` | **未** | **未** | 実装のみ |
-| `time_us_to_tick` | **未** | **未** | 実装のみ |
+| `transport_start` | 0xFA 送出 + 24ppqn グリッド開始 | ✔ | ✔ |
+| `transport_stop` | 0xFC 送出 + クロック停止(`stp`) | ✔ | ✔ |
+| `transport_continue` | 0xFB 送出 + 停止点から継続(`con`) | ✔ | ✔ |
+| `transport_locate` | song tick が移動し playback tick は戻らない(`loc`) | ✔ | ✔ |
+| `transport_get_position` | bar / beat / tick / song_tick / upq / host_us | ✔ | ✔ |
+| `tempomap_set_tempo` | PLAYING 中の 120→180、キュー積み直しなし(`tmp`) | ✔ | ✔ |
+| `tempomap_set_meter` | 4/4 の bar / beat が正しい | ✔ | ✔ |
+| `tempomap_set_loop` | song tick が巻き戻り playback tick は単調増加(`lop`) | ✔ | ✔ |
+| `seq_write` | CLICK 発音 + DIN_OUT の Note On/Off、プレフィックス受理 | ✔ | ✔ |
+| `seq_flush_after` | 未発火分が実際に減る(`flu`)+ 自己検査 | ✔ | ✔ |
+| `seq_filled_until` | 供給ループの停止条件、flush 前後の比較 | ✔ | ✔ |
+| `time_us_to_tick` | PLAYING 中は tick に一致(`u2t`)/ STOPPED は -1(`u2s`) | ✔ | ✔ |
 
-未検証の 4 関数は本フェーズの対象アプリ(metronome)が使わないもの。
-**ステップ 3 に進む前に seq_smoke を拡張して埋めることを推奨する**(所要は小さい)。
+判定結果:
+
+| ホスト | 結果 |
+|---|---|
+| 実機 | `PASS chk 255 st7`(8 項目すべて合格) |
+| Linux | `B0 77 7F` + `B0 78 01` = chk **255**(同上)、FA×1 / FB×1 / FC×2 |
+
+`time_us_to_tick` の検証に **`transport_get_position` が返す `host_us` を使う**のが
+要点である。これなら MIDI IN の受信に依存せず、同じ判定を両ホストで行える
+(受信打刻を使う実運用の経路とも同一時基)。
+
+Note On 34 / Note Off 31 の差 3 は、`transport_locate` / `transport_stop`(2 回)/
+`seq_flush_after` でキューを捨てたぶんの**未発火 note-off** であり、
+`architecture.md` §11-8 に記録した「v1 は All Notes Off をアプリ責務とする」挙動
+そのものである(仕様どおり)。
+
+#### 検証の途中で判明した、自分の検証条件の誤り
+
+初回の実機実行は `chk 127`(`flu` のみ不合格)だった。原因は**ホスト側ではなく
+検証条件**で、`seq_flush_after` の後に `seq_filled_until() <= now_tick` を要求して
+いたこと。キューが空になると `seq_filled_until` は「現在の playback tick」を返し、
+その値は刻々進むため、判定した時点では `now_tick`(同 tick の先頭で取得した値)を
+既に超えていることがある。Linux ではたまたま通り、実機で落ちた。
+**「flush の前後で `filled_until` が減ったか」**に直して両ホストで合格。
 
 ### 仕様の食い違いを 1 件発見(実装は MIDI の慣行に合わせた)
 
-`docs/hostapi-next.md` §3 の記述が 2 か所で矛盾している:
+`docs/hostapi.md` §3 の記述が 2 か所で矛盾している:
 
 - `transport_start`: 「song tick 0 から再生を開始する。playback tick も 0 にリセット」
 - `transport_locate`: 「STOPPED 中: 次の **start**/continue の開始位置になる」
@@ -287,20 +313,22 @@ Linux の送出時刻で σ33µs と安定しており、**送信ジッタでは
 locate 後に start すると 0 に戻るのか locate 位置から始まるのかが決まらない。
 実装は **MIDI の慣行(Start = 先頭から / Continue = 現在位置から)**に合わせ、
 `transport_start` は常に 0 から、`transport_locate` は `transport_continue` の
-開始位置を決める、とした。**仕様側の一文修正が必要**(§3 の `transport_locate`
-から「start/」を落とす)。承認をもらってから直す。
+開始位置を決める、とした。**2026-09-06、仕様側を修正済み**(§3 の
+`transport_locate` から「start/」を落とし、理由を併記)。
 
-### `docs/hostapi-next.md` の置き場所(提案)
+### 仕様書の整理(2026-09-06 実施済み)
 
 `shared/hostapi_defs.h` に取り込んだ後も、**§2(tick の 2 座標)・§6(アプリ要件
 突き合わせ表)・§9(time_us_to_tick の精度)は設計判断の根拠として価値がある**
-一方、§8 のコード片は重複になった。提案:
+一方、§8 のコード片は重複になった。実施内容:
 
-- `docs/hostapi-next.md` → **`docs/hostapi.md`** に改名(「案」ではなく現行仕様)。
-- §8 のコード片は削除し、「実体は `shared/hostapi_defs.h`」への参照に置き換える。
-- 冒頭の「未承認ドラフト」表記を外す。
-
-承認を得てから実施する(勝手に削除しない)。
+- `docs/hostapi-next.md` → **`docs/hostapi.md`** に改名(`git mv`。「案」ではなく
+  現行仕様)。参照していた他ドキュメント・ヘッダのリンクも更新した。
+- §8 のコード片を削除し、**「宣言の実体は `shared/hostapi_defs.h`」への参照表**に
+  置き換えた(型・enum・シンボル表を二重管理しないため)。
+- 冒頭の「未承認ドラフト」表記を外し、実装済み・検証済みであること、および
+  変更時は `hostapi_defs.h` が正であることを明記した。
+- §2 / §6 / §9 は設計判断の根拠として残した。
 
 ### 既存アプリ 7 種の回帰
 
@@ -336,6 +364,18 @@ locate 後に start すると 0 に戻るのか locate 位置から始まるの�
 起動直後の基準値: `Audio_Init: free heap 151428 -> 104224`、
 `runtime ready ... free heap 97800`、`heap after seq init: largest block 57344`。
 
+### 検証専用コードの後片付け
+
+- **Linux ホストの送出トレース**(`midi_output_bytes` の `#ifdef PHASE11_SEQ_TRACE`)は
+  削除済み。ALSA が使えない環境ではホストが元々ログ出力へフォールバックするため、
+  トレースなしでも送出バイト列は確認できる。
+- **L0 の自己検査**は削除せず、`PHASE11_L0_SELFTEST` → **`SEQCORE_SELFTEST`** に
+  改名して**恒久の opt-in テスト**として残した。フェーズ限定の検証足場ではなく
+  L0 キューの単体テストであり、呼ばなければ内部の作業バッファごとリンカに
+  落ちる(実測でも static 追加は生じていない)。ビルド時に `SEQCORE_SELFTEST` を
+  定義すると起動時に走る。
+- `git grep PHASE11` で残存なしを確認済み。
+
 ### 新たに判明した制約(ステップ 2 時点)
 
 - **アプリパーティションの残りが 0x14d0 = 5328 B** になった(seq_smoke 埋め込み後、
@@ -350,3 +390,71 @@ locate 後に start すると 0 に戻るのか locate 位置から始まるの�
   1. 測定側を Linux ホスト + UM-ONE にする(実機 MIDI OUT → UM-ONE → PC で集計)
   2. metronome2 に一時的な計測表示(`PHASE11_*_TEST`)を入れる
   3. `midi_loopback` の送信を新 API に切り替えて同一アプリ内で A/B する
+
+---
+
+## 最終回帰(2026-09-06)
+
+seq_smoke を 12 関数の自動検証アプリへ拡張し、検証専用コードを片付けた最終ビルドで実施。
+実機バイナリは `0xfeff0`(アプリパーティション 0x100000 に対し残り 0x1010 = 4112 B)。
+
+### 実機 — **合格**(生データ: `captures/phase11/monitor-final.log`)
+
+| アプリ | 開始 free heap | 終了 free heap | 差分 | largest block |
+|---|---|---|---|---|
+| demo | 54052 | 54052 | +0 | 31744 |
+| bars | 54052 | 54052 | +0 | 31744 |
+| touch_demo | 54052 | 54052 | +0 | 31744 |
+| mp3player | 54052 | 54008 | −44 | 31744 |
+| clicktest | 54008 | 54008 | +0 | 31744 |
+| metronome | 54008 | 54008 | +0 | 31744 |
+| midi_loopback | 54008 | 54008 | +0 | 31744 |
+| (参考) seq_smoke | 54052 | 54052 | +0 | 31744 |
+
+- **`largest block` は全アプリ 31744**。Phase 10 最終回帰・ステップ 1・ステップ 2 と
+  完全一致で、本フェーズを通して最大連続ブロックは一度も縮んでいない。
+- **リークは 0**(mp3player の −44B のみ。9c 以前からの既知挙動)。
+  12 関数を叩き倒す seq_smoke でも **+0**。
+- **WARN/ERROR 0 件**(起動時の `spi_flash: Detected size(16384k)...` のみ)。
+- 起動時基準値: `Audio_Init: 151428 -> 104224`、`runtime ready ... free heap 97800`。
+
+### Linux ホスト — 合格
+
+全 7 アプリが `app_init=0` / `app started` / `app stopped`、残留プロセスなし。
+
+各アプリのログに出る「警告/エラー行 2」は、いずれも
+`open /dev/snd/seq failed: Permission denied` と
+`midi: snd_seq_open failed (falling back to log-only)` の 2 行で、
+**リモートデスクトップ経由で実行しているための環境要因**である
+(ホストは仕様どおりログ出力へフォールバックして動作を継続する)。アプリ由来の
+警告・エラーは 0 件。
+
+**1 回目の実行で demo / clicktest の 2 つが SDL のウィンドウ生成前で止まり
+`KILLED` になったが、再実行では全アプリ正常だった。**ログはどちらも ALSA の 2 行で
+終わっており `font:` 行(SDL 初期化後)にも到達していないことから、アプリ側では
+なく実行環境(リモートデスクトップ経由の X)の一時的な失敗と判断する。
+
+> なお ALSA が使えない状態では、ホストが MIDI バイトを 1 本ずつ stderr へ書く
+> フォールバック経路に入る。**この状態で採ったクロック間隔の統計は測定として
+> 無効**である(σ が 800µs 級に膨らむ)。タイミングの正式値は ALSA が生きていた
+> 2026-09-05 の測定(120bpm: mean 20833.1µs / σ33.6、180bpm: mean 13888.9µs /
+> σ32.3)を用いること。
+
+## Phase 12 への申し送り
+
+1. **アプリパーティションの残りが 4112 B(0%)。** 実機フラッシュは 16MB あるが
+   `CONFIG_ESPTOOLPY_FLASHSIZE="2MB"` + `PARTITION_TABLE_SINGLE_APP` の設定になって
+   いる。Phase 12 は metronome を**上書き**で書き直す方針なので大きくは増えない
+   見込みだが、余裕がないことは事実。必要になったら
+   (a) seq_smoke の埋め込みを外す、(b) フラッシュサイズ設定を見直す、のどちらかを
+   選ぶ。設定変更はスコープ外として本フェーズでは触っていない。
+2. **前後比較ではなく絶対値目標**で判定する(指示書の追記どおり)。実機は WASM
+   アプリを同時に 1 つしか動かせないため、測定は「実機 MIDI OUT → UM-ONE → PC」で
+   採るのが 9c のプロトコルに最も近い。**ただし現状 Linux 側で ALSA が使えない**
+   ので、測定前に ALSA が使える状態(ローカルセッション等)を用意する必要がある。
+3. **既存経路はまだ生きている。** `hostapi_midi_send` の Start/Stop 副作用と
+   `Midi_NotifyBeatScheduled` / `Midi_NotifyBeatFired` によるテンポ逆算は
+   ステップ 5 まで残る。新 API と併用すると**クロックが二重に出る**ので、
+   新 metronome は `hostapi_midi_send` で Start/Stop を送らないこと。
+4. **`SEQCORE_SELFTEST`** を定義してビルドすると L0 キューの自己検査が起動時に走る
+   (恒久の opt-in テスト)。回帰時に使える。

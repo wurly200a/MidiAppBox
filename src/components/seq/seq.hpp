@@ -24,8 +24,10 @@ void Init();
 // アプリのライフサイクルに合わせて初期状態へ戻す(hostapi_audio_reset から)。
 void Reset();
 
-#ifdef PHASE11_L0_SELFTEST
-// 起動時の自己検査。失敗件数をログに出す。
+#ifdef SEQCORE_SELFTEST
+// L0 キューの自己検査(tick 順・安定順序・満杯時の受理数・flush_after の件数)。
+// 恒久の opt-in テスト。ビルド時に SEQCORE_SELFTEST を定義すると起動時に走る
+// (未定義なら本体ごとリンカに落とされる)。実装は shared/seq_core.c。
 void SelfTest();
 #endif
 

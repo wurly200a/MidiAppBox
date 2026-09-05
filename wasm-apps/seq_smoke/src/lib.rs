@@ -1,10 +1,21 @@
-// Phase 11 ステップ 2 の検証用アプリ。新しい音楽時間軸 API(12 関数)を
-// 実機と Linux ホストで同一の .wasm から叩き、下記を確認する:
-//   - transport_start で 0xFA と 24ppqn クロックが DIN_OUT に出る
-//   - seq_write した DIN_OUT の Note On/Off が tick どおりに出る
-//   - seq_write した CLICK イベントが鳴る
-//   - PLAYING 中の tempomap_set_tempo でキュー積み直しなしにテンポが変わる
-//   - transport_stop で 0xFC が出てクロックが止まる
+// Phase 11 の検証用アプリ。音楽時間軸 API(12 関数)を実機と Linux ホストで
+// 同一の .wasm から叩き、自動で一巡して合否を自己判定する。
+//
+// タップなしで走る(Linux ホストの UI クリック自動化は信頼できないため。
+// docs/lessons.md)。起動と同時に下記のステージを順に実行し、各チェックの
+// 結果を画面に 'o'(合格)/'-'(未達)で表示する。
+//
+//   stage 0: transport_start → 0xFA + 24ppqn クロック + seq_write(CLICK / DIN_OUT)
+//   stage 1: PLAYING 中の tempomap_set_tempo(120 → 180、キュー積み直しなし)
+//   stage 2: tempomap_set_loop(song tick が巻き戻り、playback tick は単調増加)
+//   stage 3: transport_locate(song が移動、playback tick は戻らない)
+//   stage 4: transport_stop → 0xFC
+//   stage 5: STOPPED 中の time_us_to_tick が -1
+//   stage 6: transport_continue → 0xFB、位置が停止点から継続
+//   常時   : time_us_to_tick(get_position の host_us) ≒ get_position の tick
+//
+// time_us_to_tick の検証に get_position の host_us を使うのが要点で、これなら
+// MIDI IN の受信に依存せず両ホストで同じ判定ができる。
 //
 // L2 の供給ループは architecture.md §11-9 のプレフィックス受理契約どおりに
 // 実装する(受理されなかった残りを保持して次 tick で再送する)。
@@ -24,12 +35,18 @@ extern "C" {
 
     fn hostapi_transport_start() -> i32;
     fn hostapi_transport_stop() -> i32;
+    fn hostapi_transport_continue() -> i32;
+    fn hostapi_transport_locate(song_tick: i32) -> i32;
     fn hostapi_transport_get_position(buf: *mut u8, buf_len: u32) -> i32;
     fn hostapi_tempomap_set_tempo(at_tick: i32, us_per_quarter: i32) -> i32;
     fn hostapi_tempomap_set_meter(at_tick: i32, numer: i32, denom: i32) -> i32;
+    fn hostapi_tempomap_set_loop(start_tick: i32, end_tick: i32) -> i32;
     fn hostapi_seq_write(buf: *const u8, buf_len: u32) -> i32;
+    fn hostapi_seq_flush_after(tick: i32) -> i32;
     fn hostapi_seq_filled_until() -> i32;
+    fn hostapi_time_us_to_tick(us: i64) -> i32;
     fn hostapi_midi_recv(buf: *mut u8, buf_len: u32) -> i32;
+    fn hostapi_midi_send(bytes: *const u8, len: u32) -> i32;
 }
 
 const PPQN: u32 = 960;
@@ -45,8 +62,19 @@ const ACCENT_SLOT: u32 = 1;
 
 const TEMPO_120: i32 = 500000;
 const TEMPO_180: i32 = 333333;
-// この song tick(4 小節目の頭)でテンポを 180 に切り替える
-const TEMPO_SWITCH_TICK: u32 = BAR * 4;
+
+const LOCATE_TARGET: u32 = BAR * 20;
+
+// ---- 自己判定フラグ ----
+const CHK_TEMPO: u16 = 1 << 0;
+const CHK_LOOP: u16 = 1 << 1;
+const CHK_LOCATE: u16 = 1 << 2;
+const CHK_STOP: u16 = 1 << 3;
+const CHK_U2T_STOPPED: u16 = 1 << 4;
+const CHK_CONT: u16 = 1 << 5;
+const CHK_U2T: u16 = 1 << 6;
+const CHK_FLUSH: u16 = 1 << 7;
+const CHK_ALL: u16 = 0xFF;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -85,23 +113,26 @@ static mut PENDING_OFF: usize = 0;
 
 static mut RUNNING: bool = false;
 static mut NEXT_BEAT: u32 = 0; // 次に供給する拍(playback tick / BEAT)
-static mut TEMPO_SWITCHED: bool = false;
-static mut ACCEPTED: u32 = 0; // 受理できたイベント総数(表示用)
-static mut REJECTED: u32 = 0; // 満杯で持ち越した回数(表示用)
+static mut ACCEPTED: u32 = 0;
+static mut REJECTED: u32 = 0;
 
-// 自機 MIDI OUT → MIDI IN のループバック受信で送出を検証する(実機用)。
-// midi_loopback の E1 と同じ考え方だが、ここは合否判定に足る最小限だけを持つ。
+static mut STAGE: u8 = 0;
+static mut CHK: u16 = 0;
+static mut PREV_SONG: u32 = 0;
+static mut PREV_PB: u32 = 0;
+static mut WRAPS: u32 = 0;
+static mut PB_MARK: u32 = 0;
+static mut SONG_AT_STOP: u32 = 0;
+static mut PB_AT_STOP: u32 = 0;
+static mut LAST_HOST_US: u64 = 0;
+
+// 自機 MIDI OUT → MIDI IN のループバック受信(実機での送出確認。任意)
 static mut RX_CLOCK: u32 = 0;
 static mut RX_START: u32 = 0;
+static mut RX_CONT: u32 = 0;
 static mut RX_STOP: u32 = 0;
 static mut RX_NOTE_ON: u32 = 0;
 static mut RX_NOTE_OFF: u32 = 0;
-static mut RX_PREV_US: u64 = 0;
-static mut RX_MIN: u32 = u32::MAX;
-static mut RX_MAX: u32 = 0;
-static mut RX_SUM: u64 = 0;
-static mut RX_N: u32 = 0;
-static mut RX_RUNSTAT: u8 = 0;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -111,8 +142,8 @@ struct RecvRec {
     _reserved: [u8; 7],
 }
 
-/// 受信バイトを最小限だけ解釈する。System Realtime(0xF8/0xFA/0xFC)は
-/// ランニングステータスを壊さないので別扱いにする。
+/// 受信バイトを最小限だけ解釈する。System Realtime は他メッセージの途中に
+/// 割り込みうるので別扱いにする。
 fn drain_rx() {
     unsafe {
         let mut recs = [RecvRec { timestamp_us: 0, byte: 0, _reserved: [0; 7] }; 16];
@@ -123,28 +154,14 @@ fn drain_rx() {
                 return;
             }
             for r in &recs[..n as usize] {
-                let b = r.byte;
-                if b >= 0xF8 {
-                    match b {
-                        0xF8 => {
-                            RX_CLOCK += 1;
-                            if RX_PREV_US != 0 {
-                                let d = (r.timestamp_us - RX_PREV_US) as u32;
-                                if d < RX_MIN { RX_MIN = d; }
-                                if d > RX_MAX { RX_MAX = d; }
-                                RX_SUM += d as u64;
-                                RX_N += 1;
-                            }
-                            RX_PREV_US = r.timestamp_us;
-                        }
-                        0xFA => RX_START += 1,
-                        0xFC => RX_STOP += 1,
-                        _ => {}
-                    }
-                } else if b >= 0x80 {
-                    RX_RUNSTAT = b;
-                    if b & 0xF0 == 0x90 { RX_NOTE_ON += 1; }
-                    if b & 0xF0 == 0x80 { RX_NOTE_OFF += 1; }
+                match r.byte {
+                    0xF8 => RX_CLOCK += 1,
+                    0xFA => RX_START += 1,
+                    0xFB => RX_CONT += 1,
+                    0xFC => RX_STOP += 1,
+                    b if b & 0xF0 == 0x90 => RX_NOTE_ON += 1,
+                    b if b & 0xF0 == 0x80 => RX_NOTE_OFF += 1,
+                    _ => {}
                 }
             }
             if (n as usize) < 16 {
@@ -154,20 +171,19 @@ fn drain_rx() {
     }
 }
 
-const BTN_Y: i32 = 176;
-const BTN_H: i32 = 52;
-const BTN_W: i32 = 100;
+const BTN_Y: i32 = 198;
+const BTN_H: i32 = 38;
+const BTN_W: i32 = 110;
 const BTN_X0: i32 = 20;
-const BTN_X1: i32 = 180;
 
 struct Line {
-    buf: [u8; 48],
+    buf: [u8; 44],
     len: usize,
 }
 
 impl Line {
     fn new() -> Line {
-        Line { buf: [b' '; 48], len: 0 }
+        Line { buf: [b' '; 44], len: 0 }
     }
     fn push(&mut self, s: &[u8]) -> &mut Line {
         for &b in s {
@@ -202,8 +218,8 @@ impl Line {
     }
 }
 
-/// 拍 n(playback tick 基準)の 1 拍ぶんのイベントを組み立てる。
-/// クリック(小節頭はアクセント)+ DIN_OUT の Note On/Off(8 分音符長)。
+/// 拍 n(playback tick 基準)の 1 拍ぶん。クリック(小節頭はアクセント)+
+/// DIN_OUT の Note On/Off(8 分音符長。対は必ず同じチャンクに入れる)。
 fn build_beat(n: u32, out: &mut [SeqEvent; CHUNK_MAX]) -> usize {
     let tick = n * BEAT;
     let in_bar = n % 4;
@@ -216,7 +232,6 @@ fn build_beat(n: u32, out: &mut [SeqEvent; CHUNK_MAX]) -> usize {
     out[k].param = if in_bar == 0 { ACCENT_SLOT } else { 0 };
     k += 1;
 
-    // Note On(ch1)。小節頭は C4、それ以外は G4
     let note: u8 = if in_bar == 0 { 60 } else { 67 };
     out[k] = SeqEvent::zero();
     out[k].tick = tick;
@@ -226,7 +241,6 @@ fn build_beat(n: u32, out: &mut [SeqEvent; CHUNK_MAX]) -> usize {
     out[k].data2 = 100;
     k += 1;
 
-    // Note Off は 8 分音符後(対で必ず同じチャンクに入れる)
     out[k] = SeqEvent::zero();
     out[k].tick = tick + BEAT / 2;
     out[k].port = PORT_DIN_OUT;
@@ -245,8 +259,18 @@ fn drop_pending() {
     }
 }
 
-/// L2 の供給ループ(docs/hostapi-next.md §10)。
-/// プレフィックス受理なので、受理されなかった残りは PENDING に持ち越す。
+/// キューを捨てる操作(locate / flush_after / stop)の後に呼ぶ。未受理分を
+/// 破棄し、seq_filled_until() から供給を再開する(§5 の契約)。
+fn resync_after_discard() {
+    unsafe {
+        drop_pending();
+        let filled = hostapi_seq_filled_until().max(0) as u32;
+        NEXT_BEAT = filled / BEAT + 1;
+    }
+}
+
+/// L2 の供給ループ(docs/hostapi.md §10)。プレフィックス受理なので、
+/// 受理されなかった残りは PENDING に持ち越して次 tick で再送する。
 fn supply(now_tick: u32) {
     unsafe {
         loop {
@@ -277,32 +301,62 @@ fn supply(now_tick: u32) {
     }
 }
 
-/// ループバック受信の集計を表示する(実機の合否判定用)
-fn draw_rx() {
+fn draw_button() {
     unsafe {
-        let mut l = Line::new();
-        l.push(b"rx clk ").push_u32(RX_CLOCK).push(b" FA").push_u32(RX_START)
-         .push(b" FC").push_u32(RX_STOP)
-         .push(b" on").push_u32(RX_NOTE_ON).push(b" off").push_u32(RX_NOTE_OFF);
-        l.draw(12, 132);
-        let mut l2 = Line::new();
-        let avg = if RX_N > 0 { (RX_SUM / RX_N as u64) as u32 } else { 0 };
-        l2.push(b"int ").push_u32(if RX_MIN == u32::MAX { 0 } else { RX_MIN })
-          .push(b"/").push_u32(avg).push(b"/").push_u32(RX_MAX).push(b" us");
-        l2.draw(12, 152);
+        let (label, color): (&[u8], u32) = if RUNNING {
+            (b"RUNNING", 0xa0_30_30)
+        } else if STAGE >= 7 {
+            (b"DONE   ", 0x20_80_40)
+        } else {
+            (b"IDLE   ", 0x20_40_a0)
+        };
+        hostapi_fill_rect(BTN_X0, BTN_Y, BTN_W, BTN_H, color);
+        hostapi_draw_text(BTN_X0 + 16, BTN_Y + 14, label.as_ptr(), label.len() as u32);
     }
 }
 
-fn draw_buttons() {
+/// 判定結果(8 項目)を o / - で表示する
+fn draw_checks() {
     unsafe {
-        let running = RUNNING;
-        let (label, color): (&[u8], u32) =
-            if running { (b"STOP ", 0xa0_30_30) } else { (b"START", 0x20_80_40) };
-        hostapi_fill_rect(BTN_X0, BTN_Y, BTN_W, BTN_H, color);
-        hostapi_draw_text(BTN_X0 + 24, BTN_Y + 16, label.as_ptr(), label.len() as u32);
-        let l2 = b"TEMPO";
-        hostapi_fill_rect(BTN_X1, BTN_Y, BTN_W, BTN_H, 0x20_40_a0);
-        hostapi_draw_text(BTN_X1 + 24, BTN_Y + 16, l2.as_ptr(), l2.len() as u32);
+        let row1: [(&[u8], u16); 4] = [
+            (b"tmp", CHK_TEMPO),
+            (b"lop", CHK_LOOP),
+            (b"loc", CHK_LOCATE),
+            (b"stp", CHK_STOP),
+        ];
+        let row2: [(&[u8], u16); 4] = [
+            (b"u2s", CHK_U2T_STOPPED),
+            (b"con", CHK_CONT),
+            (b"u2t", CHK_U2T),
+            (b"flu", CHK_FLUSH),
+        ];
+        let mut l = Line::new();
+        for (n, bit) in row1.iter() {
+            l.push(n).push(if CHK & bit != 0 { b"=o " } else { b"=- " });
+        }
+        l.draw(12, 104);
+        let mut l2 = Line::new();
+        for (n, bit) in row2.iter() {
+            l2.push(n).push(if CHK & bit != 0 { b"=o " } else { b"=- " });
+        }
+        l2.draw(12, 124);
+        let mut l3 = Line::new();
+        l3.push(if CHK == CHK_ALL { b"PASS chk " } else { b"---- chk " })
+          .push_u32(CHK as u32).push(b" st").push_u32(STAGE as u32);
+        l3.draw(12, 144);
+    }
+}
+
+fn draw_rx() {
+    unsafe {
+        let mut l = Line::new();
+        l.push(b"rx clk").push_u32(RX_CLOCK).push(b" FA").push_u32(RX_START)
+         .push(b" FB").push_u32(RX_CONT).push(b" FC").push_u32(RX_STOP);
+        l.draw(12, 160);
+        let mut l2 = Line::new();
+        l2.push(b"rx on").push_u32(RX_NOTE_ON).push(b" off").push_u32(RX_NOTE_OFF)
+          .push(b"  wr").push_u32(ACCEPTED).push(b" carry").push_u32(REJECTED);
+        l2.draw(12, 176);
     }
 }
 
@@ -310,83 +364,139 @@ fn start() {
     unsafe {
         hostapi_tempomap_set_tempo(0, TEMPO_120);
         hostapi_tempomap_set_meter(0, 4, 4);
+        hostapi_tempomap_set_loop(0, 0); // ループ解除から始める
         NEXT_BEAT = 0;
-        TEMPO_SWITCHED = false;
         ACCEPTED = 0;
         REJECTED = 0;
-        RX_CLOCK = 0; RX_START = 0; RX_STOP = 0;
+        STAGE = 0;
+        CHK = 0;
+        WRAPS = 0;
+        PREV_SONG = 0;
+        PREV_PB = 0;
+        RX_CLOCK = 0; RX_START = 0; RX_CONT = 0; RX_STOP = 0;
         RX_NOTE_ON = 0; RX_NOTE_OFF = 0;
-        RX_PREV_US = 0; RX_MIN = u32::MAX; RX_MAX = 0; RX_SUM = 0; RX_N = 0;
         drop_pending();
         if hostapi_transport_start() == 0 {
             RUNNING = true;
         }
     }
-    draw_buttons();
-}
-
-fn stop() {
-    unsafe {
-        hostapi_transport_stop();
-        RUNNING = false;
-        drop_pending(); // 未発火イベントが破棄されるので残りも捨てる(§5 の契約)
-    }
-    draw_buttons();
-}
-
-fn handle_tap(x: i16, y: i16) {
-    let (x, y) = (x as i32, y as i32);
-    if y < BTN_Y || y >= BTN_Y + BTN_H {
-        return;
-    }
-    if x >= BTN_X0 && x < BTN_X0 + BTN_W {
-        unsafe {
-            if RUNNING {
-                stop();
-            } else {
-                start();
-            }
-        }
-    } else if x >= BTN_X1 && x < BTN_X1 + BTN_W {
-        // 手動でも次の小節頭にテンポ 180 を投入できるようにしておく
-        unsafe {
-            let mut pos = [0u8; 32];
-            if hostapi_transport_get_position(pos.as_mut_ptr(), 32) == 0 {
-                let song = u32::from_le_bytes([pos[12], pos[13], pos[14], pos[15]]);
-                let at = ((song / BAR) + 1) * BAR;
-                hostapi_tempomap_set_tempo(at as i32, TEMPO_180);
-                TEMPO_SWITCHED = true;
-            }
-        }
-    }
+    draw_button();
 }
 
 #[no_mangle]
 pub extern "C" fn app_init() -> i32 {
     unsafe {
-        hostapi_fill_rect(0, 0, 320, 40, 0x30_50_90);
-        hostapi_fill_rect(0, 40, 320, 200, 0x10_18_28);
+        hostapi_fill_rect(0, 0, 320, 36, 0x30_50_90);
+        hostapi_fill_rect(0, 36, 320, 204, 0x10_18_28);
         let title = b"seq_smoke (phase 11)";
-        hostapi_draw_text(12, 12, title.as_ptr(), title.len() as u32);
+        hostapi_draw_text(12, 10, title.as_ptr(), title.len() as u32);
         hostapi_tone_define(ACCENT_SLOT as i32, 0 /*SINE*/, 1568, 30, 100);
         RUNNING = false;
-        NEXT_BEAT = 0;
-        TEMPO_SWITCHED = false;
-        ACCEPTED = 0;
-        REJECTED = 0;
-        drop_pending();
+        STAGE = 0;
+        CHK = 0;
     }
-    draw_buttons();
-    // タップなしで一巡できるよう自動開始する(Linux ホストのクリック自動化は
-    // 信頼できないため。docs/lessons.md)。8 小節で自動停止する。
+    draw_checks();
+    // タップなしで一巡できるよう自動開始する
     start();
     0
+}
+
+/// PLAYING 中のステージ進行。now_tick = playback tick、song = song tick。
+fn advance_playing(now_tick: u32, song: u32, upq: u32) {
+    unsafe {
+        match STAGE {
+            // 2 小節走らせてから、次の小節頭にテンポ 180 を投入する
+            0 => {
+                if song >= BAR * 2 {
+                    let at = (song / BAR + 1) * BAR;
+                    if hostapi_tempomap_set_tempo(at as i32, TEMPO_180) == 0 {
+                        PB_MARK = at;
+                        STAGE = 1;
+                    }
+                }
+            }
+            // テンポが実際に切り替わったらループ範囲を設定する
+            1 => {
+                if upq == TEMPO_180 as u32 {
+                    CHK |= CHK_TEMPO;
+                    let ls = (song / BAR + 1) * BAR;
+                    if hostapi_tempomap_set_loop(ls as i32, (ls + BAR) as i32) == 0 {
+                        PREV_SONG = song;
+                        PREV_PB = now_tick;
+                        WRAPS = 0;
+                        STAGE = 2;
+                    }
+                }
+            }
+            // song tick が巻き戻り、playback tick は単調増加であること
+            2 => {
+                if song < PREV_SONG && now_tick > PREV_PB {
+                    WRAPS += 1;
+                }
+                PREV_SONG = song;
+                PREV_PB = now_tick;
+                if WRAPS >= 2 {
+                    CHK |= CHK_LOOP;
+                    hostapi_tempomap_set_loop(0, 0);
+                    // seq_flush_after: 先読み済みの未発火分が実際に減ることを確認。
+                    // filled_until を「前後で減ったか」で見る(キューが空になると
+                    // 現在 playback tick が返り、その値は時々刻々進むため)
+                    let filled_before = hostapi_seq_filled_until();
+                    let removed = hostapi_seq_flush_after(now_tick as i32);
+                    if removed > 0 && hostapi_seq_filled_until() < filled_before {
+                        CHK |= CHK_FLUSH;
+                    }
+                    hostapi_transport_locate(LOCATE_TARGET as i32);
+                    resync_after_discard();
+                    PB_MARK = now_tick;
+                    STAGE = 3;
+                }
+            }
+            // locate 後: song が移動し、playback tick は戻っていないこと
+            3 => {
+                if song >= LOCATE_TARGET && now_tick >= PB_MARK {
+                    CHK |= CHK_LOCATE;
+                    if now_tick >= PB_MARK + BEAT {
+                        SONG_AT_STOP = song;
+                        PB_AT_STOP = now_tick;
+                        if hostapi_transport_stop() == 0 {
+                            CHK |= CHK_STOP;
+                        }
+                        RUNNING = false;
+                        resync_after_discard();
+                        STAGE = 5;
+                        draw_button();
+                    }
+                }
+            }
+            // continue 後: 停止点から継続していること。2 小節走らせて終了
+            6 => {
+                if now_tick >= PB_AT_STOP && song >= SONG_AT_STOP {
+                    CHK |= CHK_CONT;
+                }
+                if now_tick >= PB_AT_STOP + BAR * 2 {
+                    hostapi_transport_stop();
+                    RUNNING = false;
+                    resync_after_discard();
+                    STAGE = 7;
+                    // 判定結果を CC で外へ出す(データバイトは 7bit なので
+                    // 下位 7 個と 8 個目を 2 本に分ける)。画面を読めない
+                    // Linux ホストではこれが合否の確認手段になる。
+                    let lo = [0xB0u8, 0x77, (CHK & 0x7F) as u8];
+                    hostapi_midi_send(lo.as_ptr(), 3);
+                    let hi = [0xB0u8, 0x78, ((CHK >> 7) & 0x7F) as u8];
+                    hostapi_midi_send(hi.as_ptr(), 3);
+                    draw_button();
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn app_tick() {
     drain_rx();
-    draw_rx();
 
     let mut evs = [Event { ev_type: 0, param: 0, x: 0, y: 0, time_ms: 0 }; 8];
     let n = unsafe {
@@ -394,51 +504,73 @@ pub extern "C" fn app_tick() {
                            (8 * core::mem::size_of::<Event>()) as u32)
     };
     for ev in &evs[..n.max(0) as usize] {
-        if ev.ev_type == EV_TOUCH_DOWN {
-            handle_tap(ev.x, ev.y);
+        // 再実行はボタン領域のタップのみ(結果を読んでいる最中に画面を
+        // 触っても走り出さないようにする)
+        if ev.ev_type == EV_TOUCH_DOWN && unsafe { !RUNNING }
+            && (ev.y as i32) >= BTN_Y && (ev.x as i32) >= BTN_X0
+            && (ev.x as i32) < BTN_X0 + BTN_W
+        {
+            start();
         }
     }
 
+    let mut pos = [0u8; 32];
+    if unsafe { hostapi_transport_get_position(pos.as_mut_ptr(), 32) } != 0 {
+        return;
+    }
+    let host_us = u64::from_le_bytes([pos[0], pos[1], pos[2], pos[3],
+                                      pos[4], pos[5], pos[6], pos[7]]);
+    let now_tick = u32::from_le_bytes([pos[8], pos[9], pos[10], pos[11]]);
+    let song = u32::from_le_bytes([pos[12], pos[13], pos[14], pos[15]]);
+    let bar = u32::from_le_bytes([pos[16], pos[17], pos[18], pos[19]]);
+    let upq = u32::from_le_bytes([pos[20], pos[21], pos[22], pos[23]]);
+    let beat = u16::from_le_bytes([pos[24], pos[25]]);
+
     unsafe {
+        LAST_HOST_US = host_us;
+
         if !RUNNING {
-            return;
-        }
-        let mut pos = [0u8; 32];
-        if hostapi_transport_get_position(pos.as_mut_ptr(), 32) != 0 {
-            return;
-        }
-        let now_tick = u32::from_le_bytes([pos[8], pos[9], pos[10], pos[11]]);
-        let song_tick = u32::from_le_bytes([pos[12], pos[13], pos[14], pos[15]]);
-        let bar = u32::from_le_bytes([pos[16], pos[17], pos[18], pos[19]]);
-        let upq = u32::from_le_bytes([pos[20], pos[21], pos[22], pos[23]]);
-        let beat = u16::from_le_bytes([pos[24], pos[25]]);
-
-        // 8 小節で自動停止(transport_stop → 0xFC、クロック停止の確認)
-        if song_tick >= BAR * 8 {
-            stop();
-            let done = b"STOPPED (8 bars done)";
-            hostapi_draw_text(12, 132, done.as_ptr(), done.len() as u32);
+            // stage 5: STOPPED 中の time_us_to_tick は -1、その後 continue する
+            if STAGE == 5 {
+                if hostapi_time_us_to_tick(host_us as i64) == -1 {
+                    CHK |= CHK_U2T_STOPPED;
+                }
+                if hostapi_transport_continue() == 0 {
+                    RUNNING = true;
+                    resync_after_discard();
+                    STAGE = 6;
+                    draw_button();
+                }
+            }
+            draw_checks();
+            draw_rx();
             return;
         }
 
-        // 4 小節目の頭でテンポを 180 へ(PLAYING 中の投入。積み直しは不要)
-        if !TEMPO_SWITCHED && song_tick + BAR > TEMPO_SWITCH_TICK {
-            hostapi_tempomap_set_tempo(TEMPO_SWITCH_TICK as i32, TEMPO_180);
-            TEMPO_SWITCHED = true;
+        // time_us_to_tick(get_position の host_us) は同 tick を返すはず。
+        // 2 回の呼び出しの間に進む分だけずれるので余裕を持って判定する。
+        let t = hostapi_time_us_to_tick(host_us as i64);
+        if t > 0 {
+            let tu = t as u32;
+            let d = if tu > now_tick { tu - now_tick } else { now_tick - tu };
+            if d <= 100 {
+                CHK |= CHK_U2T;
+            }
         }
 
+        advance_playing(now_tick, song, upq);
         supply(now_tick);
 
         let mut l = Line::new();
         l.push(b"bar ").push_u32(bar + 1).push(b" beat ").push_u32(beat as u32 + 1)
-         .push(b"  upq ").push_u32(upq);
-        l.draw(12, 60);
+         .push(b" upq ").push_u32(upq);
+        l.draw(12, 56);
         let mut l2 = Line::new();
-        l2.push(b"tick ").push_u32(now_tick).push(b" filled ")
-          .push_u32(hostapi_seq_filled_until().max(0) as u32);
-        l2.draw(12, 84);
-        let mut l3 = Line::new();
-        l3.push(b"written ").push_u32(ACCEPTED).push(b"  carried ").push_u32(REJECTED);
-        l3.draw(12, 108);
+        l2.push(b"pb ").push_u32(now_tick).push(b" song ").push_u32(song)
+          .push(b" wrap ").push_u32(WRAPS);
+        l2.draw(12, 80);
     }
+
+    draw_checks();
+    draw_rx();
 }
