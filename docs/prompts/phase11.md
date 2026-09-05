@@ -284,3 +284,11 @@ flash 前に `esp32-monitor` の docker コンテナがシリアルポートを�
    対照、SL MK3 の目視結果、判定
 5. 発見した設計との乖離・新たに判明した制約(あれば)、およびステップ 4 以降への
    申し送り
+
+## 追記(2026-09-06): スコープ変更
+
+ステップ 2 完了時点で以下を変更する。
+
+- ステップ 3(metronome の書き直しと前後比較)は Phase 12 へ移管する。 理由: 実機は WASM アプリを 1 つしか動かせず指示書どおりの前後比較が成立しないこと、Phase 09 の実装は実用に耐えないため「前」の再測定に価値がないこと、アプリパーティション残が少なく本フェーズ内で新アプリを足す余地がないこと。Phase 12 では旧版との比較ではなく絶対値目標(欠落 0・clocks/expected 100%・BPM 単峰・平均間隔 20833µs)を達成条件とし、metronome は別ディレクトリに分けず上書きで書き直す。
+- 本フェーズの残作業: 未検証 4 関数(transport_continue / transport_locate / tempomap_set_loop / time_us_to_tick)を seq_smoke に追加して実機・Linux 双方で検証する。hostapi-next.md §3 の transport_locate 記述を修正し(「start/」を落とす)、docs/hostapi.md へ改名して §8 のコード片を shared/hostapi_defs.h への参照に置き換える。
+- 完了条件を差し替える: 12 関数すべてが実機・Linux で検証済み、既存アプリの回帰なし、docs/results/phase11.md に検証表、docs/status.md 更新。ステップ 3 に関する完了条件は Phase 12 へ移す。
