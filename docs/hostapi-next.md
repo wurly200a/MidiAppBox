@@ -78,6 +78,10 @@ hostapi_transport_stop() -> 0/-1
   - L0 のキューに残った未発火イベントは破棄する。
   - 発音中のノートに対する All Notes Off はホストが自動送出しない
     (アプリが必要に応じて hostapi_midi_send で送る。App drives の原則)。
+    **推奨イディオム: transport_stop() を呼んでから hostapi_midi_send で
+    All Notes Off を送る**(stop 後なのでレースがない)。判断の記録と
+    再検討トリガは architecture.md §11-8。transport_locate(PLAYING 中)/
+    seq_flush_after も同じ扱い。
   - 既に STOPPED のときは何もせず -1。
   - **v1 の選択: STOPPED 中はクロックを流さない。** 市販機には停止中も
     クロックを送り続けてスレーブにテンポを追従させる流儀もあるが、v1 は
@@ -95,7 +99,8 @@ hostapi_transport_locate(song_tick) -> 0/-1
   - STOPPED 中: 次の start/continue の開始位置になる。
   - PLAYING 中: 即座にジャンプする。L0 の未発火イベントは破棄され
     (移動前の位置に対する予約なので)、L2 が新しい位置から供給し直す。
-    アプリは locate 後に seq_filled_until() を見て再供給すること。
+    アプリは locate 後に、保持している未受理分(PENDING、§5)を破棄したうえで
+    seq_filled_until() を見て再供給すること。
   - Song Position Pointer の送出は v1 ではスコープ外(9c からの持ち越し)。
 
 hostapi_transport_get_position(buf_ptr, buf_len) -> 0/-1
@@ -138,17 +143,37 @@ L2 が先読みイベントを供給する経路。
 hostapi_seq_write(buf_ptr, buf_len) -> n
   hostapi_seq_event_t の配列(buf_len はバイト数)を L0 のキューへ積む。
   受理した件数 n を返す(キューに空きがなければ要求より少ない。0 もありうる)。
+  - **受理は必ず先頭からの連続した n 件(プレフィックス)である。** ホストが
+    途中を飛ばして受理することはない(0 <= n <= buf_len/16)。
+  - **残り(n 件目以降)はアプリが保持し、次回の seq_write で再送する義務を
+    負う(プレフィックス受理契約)。** ホストは残りを覚えない。再送は
+    「それより後の tick のイベントを書く前」に行うこと(同一 tick 内の
+    書き込み順の保証が崩れないようにするため)。
+  - **transport_locate(PLAYING 中)/ seq_flush_after / transport_stop の後は、
+    アプリが保持している未受理分(PENDING)を破棄すること。** これらは
+    キューの未発火イベントを破棄する操作であり、破棄前の位置に対して
+    組み立てた残りを再送すると、意味のないイベントを新しい位置へ
+    紛れ込ませることになる。破棄したうえで seq_filled_until() を見て
+    新しい位置から供給し直す(実装イメージは §10)。
+  - 再送が遅れて tick が現在位置を過ぎてもイベントは失われない(過去 tick は
+    可及的速やかに発火する)。したがって **「note-on だけが受理されて対応する
+    note-off が失われる(鳴りっぱなし)」は契約上起こらない。** 飽和時の劣化は
+    「note-off が少し遅れる」であって「消える」ではない。
   - tick は playback tick(絶対)。現在位置より過去の tick は可及的速やかに
     発火する(取りこぼしよりは遅延を選ぶ)。
   - 同一 tick 内の順序は、この関数に書かれた順を保つ。
   - buf_len / 16 件を上限に読む。端数バイトは無視。
   - キュー深さは 256 件(根拠は architecture.md §9)。
-  - L2 は毎 tick 「filled_until() < now + horizon なら書き足す」を回すだけでよい。
+  - L2 は毎 tick 「filled_until() < now + horizon なら書き足す」を回すだけでよい
+    (実装イメージは §10。**プレフィックス受理があるので n == 0 で chunk を
+    捨ててはならない**)。
 
 hostapi_seq_flush_after(tick) -> n
   playback tick が指定値以上の未発火イベントをキューから取り除き、
   取り除いた件数を返す。パンチイン、曲の差し替え、locate 後の再供給に使う。
   - tick == 0 で全件破棄。
+  - アプリは呼び出し後、保持している未受理分(PENDING)を破棄して
+    seq_filled_until() から供給し直すこと(上記 seq_write の契約)。
 
 hostapi_seq_filled_until() -> tick
   キューに積まれている最後のイベントの playback tick を返す。
@@ -360,16 +385,37 @@ hostapi_time_us_to_tick(us) -> playback_tick   /* us は i64 */
 ## 10. アプリ側の典型的なループ(L2 の実装イメージ)
 
 ```rust
+// L2 の状態: 未受理の残りを保持する(プレフィックス受理契約, §5)
+static mut PENDING: [hostapi_seq_event_t; CHUNK_MAX] = ...;
+static mut PENDING_LEN: usize = 0;   // 生成済み件数
+static mut PENDING_OFF: usize = 0;   // うち受理済み件数
+
+// transport_locate(PLAYING 中)/ seq_flush_after / transport_stop の直後に呼ぶ。
+// キューの未発火イベントが破棄されるので、破棄前の位置に対して組み立てた
+// 残りも一緒に捨てる(§5 の契約)
+fn drop_pending() {
+    unsafe { PENDING_LEN = 0; PENDING_OFF = 0; }
+}
+
 // app_tick() 内(100ms 周期)
 let mut pos = [0u8; 32];
 hostapi_transport_get_position(pos.as_mut_ptr(), 32);
 let now_tick = u32::from_le_bytes(pos[8..12].try_into().unwrap());
 
 let horizon = 2 * 4 * HOSTAPI_PPQN;           // 2 小節(4/4)
-while hostapi_seq_filled_until() < now_tick + horizon {
-    let events = build_next_chunk();           // L3 の曲構造から生成
-    let n = hostapi_seq_write(events.as_ptr(), events.len() * 16);
-    if n == 0 { break; }                       // キュー満杯。次の tick で再試行
+loop {
+    // 1. 残りがあれば必ず先に片付ける(後続 tick を書く前に再送する)
+    if PENDING_OFF == PENDING_LEN {
+        if hostapi_seq_filled_until() >= now_tick + horizon { break; }
+        PENDING_LEN = build_next_chunk(&mut PENDING);  // L3 の曲構造から生成
+        PENDING_OFF = 0;
+        if PENDING_LEN == 0 { break; }                 // 供給するものがない
+    }
+    // 2. 未受理分だけを書く。受理されなかった分は PENDING に残る
+    let src = &PENDING[PENDING_OFF..PENDING_LEN];
+    let n = hostapi_seq_write(src.as_ptr(), (src.len() * 16) as u32) as usize;
+    PENDING_OFF += n;
+    if n < src.len() { break; }                        // キュー満杯。次の tick で再送
 }
 ```
 
