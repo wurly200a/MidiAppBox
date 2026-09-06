@@ -257,6 +257,43 @@ largest free block / WARN・ERROR を集計して Markdown の表と合否を出
 (Phase 12 で、モニタ再起動直後の `waitfor` が前回の起動ログに一致し、まだ起動して
 いないのに起動したと誤判定した実績がある)。ペインは人間が見るライブ表示として残す。
 
+### 3.5 MIDI Clock の測定(Phase 13 で追加)
+
+実機 MIDI OUT → UM-ONE → PC で受けたクロックを記録・集計する。集計項目は
+`midi_loopback` の E1 統計と同じ(0xF8 総数・期待数・clocks÷expected・間隔の
+min/mean/max・ヒストグラム・外れ値・見かけ BPM の分布・0xFA/0xFB/0xFC の件数)。
+
+```bash
+# 計測(captures/<タスク名>/<ラベル>.csv と .md を作る)
+./scripts/midi-clock-probe.sh --task phase13 --label A1 --duration 330 --bpm 120
+
+# 既存 CSV を条件を変えて集計し直す(再測定は不要)
+./scripts/midi-clock-probe.sh --analyze-only --task phase13 --label A1 \
+    --from 120 --to 300          # 判定窓を切る(例: テンポ変更区間を除外)
+./scripts/midi-clock-probe.sh --analyze-only --task phase13 --label C \
+    --segments auto              # テンポ切替を検出して区間ごとに集計
+./scripts/midi-clock-probe.sh --analyze-only --task phase13 --label A23 --span 2
+                                 # 2 番目の再生区間(0xFA〜0xFC)だけを対象にする
+
+# 送信側打刻のログ(検証ビルドの `PHASE13 TX <us>` 行)から σ を出す
+./scripts/midi-clock-probe.sh --txlog captures/phase13/monitor.log --label D
+```
+
+- 実体は `tools/midi_clock_probe/`(C の受信プローブ + Python の集計)。
+  ビルドはラッパが必要なときだけ行う(成果物は .gitignore 対象)。
+- 接続先は既定で名前に `UM-ONE` を含むポート。`--port <部分一致>` で変更でき、
+  Linux ホスト自身の出力を測るときは `--port MidiAppBox` を使う。
+  測定対象を後から起動する場合は `--wait <秒>` を付ける。
+- 打刻は **ALSA のカーネル側(real-time キュー)を主**、受信ループの
+  `CLOCK_MONOTONIC` を副として両方 CSV に残す。出力表の「カーネル打刻とユーザ打刻の差」が
+  ツール自身の遅延の自己検証になる(mean 数十µs が正常)。
+- **STOPPED をまたぐ間隔は統計から除外される**(0xFA/0xFB〜0xFC の再生区間ごとに
+  集計する)。stop→continue の空白を外れ値と数えないため。
+- **受信側の σ で送信精度を判定しないこと。** UM-ONE 経由は USB の 1ms フレームを
+  通るのでぼやける。送信側の σ は検証ビルドの送信打刻(`--txlog`)で見る。
+  なお **MIDI DIN は 1 バイト 320µs** なので、それより短い受信間隔が出たら
+  配送側でまとめて届いたアーティファクトである(P10-5 と同じ理屈)。
+
 ## §4 一巡チェックモード(routine)
 
 本書の手順を「そのまま一巡実行して確認するだけ」の回として実行する場合の追加ルール:

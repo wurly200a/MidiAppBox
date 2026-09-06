@@ -7,3 +7,4 @@ src/sdkconfig
 wasm-apps/*/target/
 hosts/linux/build/
 captures/
+tools/midi_clock_probe/build/
