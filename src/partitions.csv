@@ -1,0 +1,12 @@
+# MidiAppBox partition table (16MB flash, no OTA).
+# The offsets of nvs / phy_init / factory are identical to the ESP-IDF
+# "single app" default table, so existing NVS contents survive the change.
+# Only the factory partition grows (1MB -> 4MB). No extra data partition is
+# reserved: every runtime partition entry costs ~56 B of internal heap
+# (measured in Phase 12) and there is no consumer for on-flash app storage
+# yet (apps live on the SD card). The space after factory stays free, so one
+# can be added later without moving any existing offset.
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+phy_init,   data, phy,     0xf000,   0x1000,
+factory,    app,  factory, 0x10000,  0x400000,

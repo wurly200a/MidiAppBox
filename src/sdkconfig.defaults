@@ -14,3 +14,12 @@ CONFIG_WAMR_ENABLE_AOT=n
 CONFIG_WAMR_ENABLE_LIB_PTHREAD=n
 CONFIG_WAMR_ENABLE_LIBC_WASI=n
 CONFIG_WAMR_ENABLE_APP_FRAMEWORK=n
+
+# Phase 12 作業 1: 実フラッシュは 16MB。既定の 2MB / single-app(factory 1MB)では
+# ファームウェア領域の残りが約 4KB しかなく、アプリを 1 本足すだけで溢れる。
+# partitions.csv は nvs / phy_init / factory のオフセットを既定表と同一に保つ
+# (= 既存の NVS 内容は失われない)。factory のみ 1MB -> 4MB へ拡張する。
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
