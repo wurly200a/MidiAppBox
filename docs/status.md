@@ -328,3 +328,36 @@ CLAUDE.md から独立して更新する(CLAUDE.md 本体は書き換えない)�
   - 次の候補は移行ステップ 4 / 4b / 5(旧クリック経路の置換・削除、
     `hostapi_midi_send` の Start/Stop 副作用の削除)。旧経路の残る利用者は
     clicktest と midi_loopback のみ。
+
+- **Phase 14(docs/prompts/phase14.md、旧経路の削除 = 移行ステップ 4b / 5)
+  完了(2026-09-06)。** 詳細は `docs/results/phase14.md`。
+  - **ステップ 1**: `wasm-apps/midi_loopback/` を音楽時間軸 API へ移行。
+    `hostapi_transport_start/stop` + `tempomap_set_tempo/meter`(120bpm 固定)に
+    一本化し、`hostapi_click_schedule` / `hostapi_midi_send` を `extern` から
+    削除。可聴クリックは供給しない判断(受信統計に条件を絞る)。E1 統計は
+    恒久機能のまま維持。実機ループバック測定(自機 MIDI OUT → 自機 MIDI IN、
+    120bpm・4/4、約 6.3 分)で**外れ値 0 件 / clocks÷expected 100.00%
+    (18255/18255)/ 見かけ BPM 単峰 / 平均間隔 20836µs**(目標 20833±10µs)を
+    確認。測定には Phase 9c と同じ手法(画面外センチネル座標 + 検証専用
+    シリアルログ転送フック `PHASE14_STATLOG_TEST`)を使い、測定後に削除。
+  - **ステップ 2**: `wasm-apps/clicktest/` を削除(回帰対象 6 本 → 5 本)。
+    カバレッジの穴が空かないことを確認済み(`docs/results/phase12.md` 追記)。
+  - **ステップ 3**: `hostapi_click_schedule` / `hostapi_tone_schedule` を
+    `shared/hostapi_defs.h`・両ホストから削除(native 実装・予約状態・
+    `Midi_NotifyBeatScheduled/Fired` の呼び出し側を含む)。トーンパレットの
+    即時発音(`tone_define` / `tone_play` / `play_click`)は無影響。
+  - **ステップ 4**: `hostapi_midi_send` の Start/Stop 副作用と旧クロック
+    生成器(`s_clock_running` 等のテンポ逆算状態、`Midi_NotifyBeatScheduled/
+    Fired` の定義)を両ホストから削除。**9c の根本原因(テンポの二重管理・
+    毎拍位相リセット)がコードから物理的に消えた**。
+  - **回帰 PASS**(5 本、free heap 差分 +0、largest block 31744 で不変、
+    警告 0)。free heap の水準は削除が進むごとに増加(49136 → 49288、
+    esp_timer ハンドル 2 個分の解放)。Linux ホストも 5 本が
+    `app_init=0` / `app started` / `app stopped`、警告 0 で起動・終了。
+  - フラッシュ使用量: Phase 13 時点 1,048,816 B → Phase 14 完了時
+    1,045,984 B(**−2,832 B**)。
+  - 検証専用コード(`PHASE14_STATLOG_TEST`)は削除済み、
+    `git grep PHASE14 -- src scripts wasm-apps tools` は該当なし。
+  - **次の候補**: 移行ステップ 6(内蔵音源のポート追加)。PSRAM の本番反映は
+    Phase 12 の「条件付き go」のまま別フェーズ。`hostapi_midi_recv` の
+    タイムスタンプ線速補正(docs/hostapi.md §7)も未実施のまま持ち越し。

@@ -4,15 +4,16 @@ Phase 10(`docs/prompts/phase10.md`)の実測調査と初版レビューを経て
 **2026-09-05 に確定**した方針。実測値の出典は `docs/results/phase10.md`。
 Host API の仕様は `docs/hostapi.md`。
 
-**実装状況**(2026-09-06): 移行表(§10)の**ステップ 1〜2 が完了**している。
+**実装状況**(2026-09-06): 移行表(§10)の**ステップ 1〜5(4 を除く)が完了**している。
 L0/L1 は実装済み(ロジック本体は両ホスト共通の `shared/seq_core.c`、
 プラットフォーム束ねは実機 `src/components/seq/` と Linux
 `hosts/linux/hostapi_seq.c`)、Host API の 12 関数も `shared/hostapi_defs.h` に
 取り込み済みで、実機・Linux 双方で検証済み(`docs/results/phase11.md`)。
-
-ただし**既存アプリはまだ新 API を使っておらず**、§1 に挙げた 3 つの問題は
-現行の経路(`hostapi_midi_send` の副作用 + `Midi_NotifyBeat*` によるテンポ逆算)に
-残ったままである。その解消はステップ 3 以降(Phase 12〜)。
+metronome(Phase 13)・midi_loopback(Phase 14)が新 API へ移行し、
+旧経路(`hostapi_click_schedule` / `hostapi_tone_schedule` / `hostapi_midi_send`
+の Start/Stop 副作用)は Phase 14 でコードごと削除した(`docs/results/phase14.md`)。
+**§1 の 3 つの問題はすべて解消済み**(1・2 はコード削除、3 は Phase 11 の
+新 API 追加)。
 
 ## 0. 設計の検証観点(最初に読むこと)
 
@@ -47,6 +48,13 @@ Host API の語彙は増えないはずである。増えるなら層の切り�
    データと対照実験で実証済み。
 3. **小節・拍・ループ・テンポマップが表現できない**: セクション構成や途中テンポ
    変更を持つ曲、SMF、録音の打刻といった要件が現行の語彙では表現できない。
+
+**解消済み(2026-09-06、Phase 14)**: 1・2 は `hostapi_click_schedule` /
+`hostapi_tone_schedule` と `hostapi_midi_send` の Start/Stop 副作用・
+`Midi_NotifyBeatScheduled` / `Midi_NotifyBeatFired` をコードから物理的に削除して
+解消した(利用者がゼロになった Phase 14 で実施。詳細は `docs/results/phase14.md`)。
+3 は Phase 11 の `transport_*` / `tempomap_*` / `seq_*` 追加で解消済み。
+現行アーキテクチャの限界としては、この節はすべて過去形になった。
 
 ## 2. 層構成(L0〜L3)
 
@@ -331,17 +339,18 @@ MIDI クロックはグリッドから直接生成するため**キューを消�
 
 既存アプリ(touch_demo / mp3player / clicktest / metronome / midi_loopback /
 seq_smoke)の回帰を壊さないことを各ステップの完了条件とする。回帰対象は
-Phase 12 作業 2 でこの 6 本に絞った(Host API のカバレッジ表は
-docs/results/phase12.md)。
+Phase 12 作業 2 でこの 6 本に絞り(Host API のカバレッジ表は
+docs/results/phase12.md)、Phase 14 で clicktest を削除して 5 本になった
+(`docs/results/phase14.md`)。
 
 | # | ステップ | 完了条件 |
 |---|---|---|
 | 1 | L0/L1 を native に実装(既存経路と並存、まだ誰も使わない) | **完了 2026-09-05**。静的追加 4.6KB、largest free block は 31744 で Phase 10 と一致、既存 7 アプリ回帰なし(`docs/results/phase11.md`) |
 | 2 | Host API 追加(`transport_*` / `tempomap_*` / `seq_*` / `time_us_to_tick`) | **完了 2026-09-06**。12 関数を実機・Linux 双方で検証済み。ロジックは両ホスト共通の `shared/seq_core.c`。既存 API のシグネチャ・挙動は不変(`docs/results/phase11.md`) |
 | 3 | **metronome を新 API で書き直す** | **完了 2026-09-06(Phase 13)**。旧経路(`hostapi_click_schedule` / `hostapi_tone_schedule` / `hostapi_midi_send`)を `extern` から外し、クリックは `seq_write(port=CLICK)`、MIDI クロックは L1 のグリッド生成に一本化。実機でアイドル 5.5 分 ×3 を測定し、**クロック欠落 0 / clocks÷expected 100.00% / 見かけ BPM 単峰 / 平均間隔 20832.8µs**(9c の「61% の拍で 1 発欠落」が解消)。詳細は `docs/results/phase13.md` |
-| 4 | 既存クリックスケジューラを L0 経由に置換(`hostapi_click_schedule` / `hostapi_tone_schedule` を L0 の薄いラッパにする) | clicktest / metronome(旧版)の回帰なし。内部だけが切り替わる |
-| 4b | **ステップ 4 完了後、`hostapi_click_schedule` / `hostapi_tone_schedule` を削除する** | 全アプリが `seq_write` へ移植済みであること。削除期限は日付ではなく**「ABI を対外的に確定版として公開する時点より前」**(§11-3) |
-| 5 | `hostapi_midi_send` の Start/Stop 副作用(クロック生成トリガ)を削除 | テンポの二重管理が消える。midi_loopback で確認 |
+| 4 | 既存クリックスケジューラを L0 経由に置換(`hostapi_click_schedule` / `hostapi_tone_schedule` を L0 の薄いラッパにする) | **Phase 14 で実施せず 4b へ直行**(下記参照) |
+| 4b | **`hostapi_click_schedule` / `hostapi_tone_schedule` を削除する** | **完了 2026-09-06(Phase 14 ステップ 2〜3)**。ステップ 4 の中間ラッパ化を経ずに直行した。理由: 本フェーズの時点で旧 API の利用者は clicktest(削除対象そのもの)と metronome/midi_loopback の旧経路(いずれも同フェーズ内で新 API へ移行済み)だけで、ラッパを作る意味がなかったため(ラッパは「旧アプリを動かしたまま内部だけ差し替える」ためのものだが、本フェーズで利用者がゼロになる)。`docs/results/phase14.md` |
+| 5 | `hostapi_midi_send` の Start/Stop 副作用(クロック生成トリガ)を削除 | **完了 2026-09-06(Phase 14 ステップ 4)**。テンポの二重管理・毎拍位相リセットのコードが消えた(§1 参照)。5 本の回帰 PASS、`git grep NotifyBeat` 該当なし。`docs/results/phase14.md` |
 | 6 | ポート抽象の拡張(内蔵音源) | 別フェーズ。API 語彙は増えないことを確認 |
 
 ステップ 3 が本改訂の価値を最初に検証する地点である
@@ -415,6 +424,11 @@ PSRAM 移動」を**一体で行う別フェーズ**とし、その完了条件�
 互換性負債になるが、それまでは内部都合で消せる。
 具体的には **移行ステップ 4 完了後(全アプリを `seq_write` へ移植し終えた時点)
 に削除する**(§10 のステップ 4b)。
+
+**実施(2026-09-06、Phase 14)**: 全アプリの移植が完了した時点でステップ 4
+(中間ラッパ化)を経ずに 4b(削除)へ直行した。ABI を対外的に公開していない
+という本判断の前提はまだ崩れていないため、この決定の範囲内である
+(詳細・直行の理由は §10 ステップ 4/4b、`docs/results/phase14.md`)。
 
 ### 11-4. 受信打刻補正を `hostapi_midi_recv` にも適用するか — **適用で確定**
 

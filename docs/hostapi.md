@@ -284,10 +284,10 @@ hostapi_seq_filled_until() -> tick
 
 | 既存 API | 扱い | 理由 |
 |---|---|---|
-| `hostapi_midi_send` | **残す**。ただし **Start/Stop/Continue の副作用(内部クロック生成のトリガ)は削除する** | 素の MIDI バイト送出(SysEx、即時 CC、All Notes Off)は引き続き必要。一方、副作用によるテンポ逆算が 9c の根本原因を作ったので、transport_* に一本化する |
-| `hostapi_midi_recv` | **残す**(シグネチャ不変)。ただし**タイムスタンプに線速補正を適用する**(意味の変更) | 「受信直後に打刻した時刻」→「線上の推定到着時刻」。1 バイト単独受信では補正量ゼロなのでクロック計測系(9c との比較)は無影響。根拠は architecture.md §8 / §11-4 |
-| `hostapi_click_schedule` | **非推奨化 → 移行ステップ 4 完了後に削除** | `seq_write(port=CLICK)` に置換。既存アプリ(metronome / clicktest)の回帰を守るため、まず移行ステップ 4 で内部を L0 の薄いラッパに載せ替え、全アプリの移植完了後に削除する。削除期限は日付ではなく「ABI を対外的に確定版として公開する時点より前」(architecture.md §11-3) |
-| `hostapi_tone_schedule` | **非推奨化 → 同上** | 同上 |
+| `hostapi_midi_send` | **残す**。**Start/Stop/Continue の副作用(内部クロック生成のトリガ)は削除済み**(Phase 14) | 素の MIDI バイト送出(SysEx、即時 CC、All Notes Off)専用になった。副作用によるテンポ逆算が 9c の根本原因だったため、transport_* に一本化した。詳細は `docs/results/phase14.md` |
+| `hostapi_midi_recv` | **残す**(シグネチャ不変)。ただし**タイムスタンプに線速補正を適用する**(意味の変更、**未実施**) | 「受信直後に打刻した時刻」→「線上の推定到着時刻」。1 バイト単独受信では補正量ゼロなのでクロック計測系(9c との比較)は無影響。根拠は architecture.md §8 / §11-4。実装は別フェーズ |
+| `hostapi_click_schedule` | **削除済み**(Phase 14) | `seq_write(port=CLICK)` に置換。全アプリ(metronome は Phase 13、midi_loopback は Phase 14、唯一の残存利用者だった clicktest は Phase 14 で削除)の移植完了を確認してから削除した。ステップ 4(中間ラッパ化)は経ず 4b へ直行(architecture.md §10 / §11-3)。詳細は `docs/results/phase14.md` |
+| `hostapi_tone_schedule` | **削除済み**(Phase 14) | 同上 |
 | `hostapi_tone_define` / `hostapi_tone_play` | **残す** | トーンパレットの定義・即時発音は L0 の CLICK port が使う。予約だけが seq に移る |
 | `hostapi_now_ms` | **残す** | UI 用の実時間。音楽時間軸とは別系統 |
 | gfx / input / audio / fs | **変更なし** | 本改訂の対象外 |
@@ -297,7 +297,10 @@ hostapi_seq_filled_until() -> tick
 midi_loopback による確認を伴って行う:
 
 1. `hostapi_midi_send` の Start/Stop 副作用の削除(ステップ 5)。
+   **完了(Phase 14)**。midi_loopback の新 API 移行(ステップ 1)と
+   実機ループバック測定で確認済み(`docs/results/phase14.md`)。
 2. `hostapi_midi_recv` のタイムスタンプ意味変更(線速補正の適用)。
+   **未実施**(別フェーズ)。
    `shared/hostapi_defs.h` の当該記述も更新すること。補正式は
    「イベント内のバイトが線速で連続到着した」と仮定するため、idle ギャップを
    挟んで 1 イベントにまとめられた場合は**過補正になりうる**
