@@ -247,6 +247,36 @@ void launcher_show(const char* status_msg)
     lvgl_port_unlock();
 }
 
+bool launcher_launch_by_name(const char* name, const char** err, char* path_out,
+                             size_t path_out_len)
+{
+    if (!name || !*name) { *err = "empty name"; return false; }
+    if (strchr(name, '/')) { *err = "name must not contain /"; return false; }
+
+    char path[96];
+    if (has_wasm_ext(name)) {
+        snprintf(path, sizeof(path), "%s/%s", kAppsDir, name);
+    } else {
+        snprintf(path, sizeof(path), "%s/%s.wasm", kAppsDir, name);
+    }
+
+    struct stat st;
+    if (stat(path, &st) != 0) { *err = "no such app"; return false; }
+    if (app_is_running()) { *err = "another app is running"; return false; }
+
+    ESP_LOGI(TAG, "launch: %s", path);
+    hostapi_app_screen_create();
+    if (!app_start(path, launcher_on_app_stopped)) {
+        // 起動できなければメニューへ戻す(launcher_show が lock を取る)
+        launcher_show("busy: another app still stopping");
+        hostapi_app_screen_destroy();
+        *err = "app_start failed";
+        return false;
+    }
+    if (path_out && path_out_len) snprintf(path_out, path_out_len, "%s", path);
+    return true;
+}
+
 void launcher_on_app_stopped(const char* error)
 {
     ESP_LOGI(TAG, "app stopped: %s", error ? error : "ok");

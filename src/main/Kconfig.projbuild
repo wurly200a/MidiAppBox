@@ -9,4 +9,14 @@ menu "MidiAppBox"
             mid-cycle (logging free heap per cycle) and a corrupted-wasm
             load test. For leak verification (Phase 5C/6B).
 
+    config MIDIBOX_SERIAL_CMD
+        bool "Enable the serial command console (USB Serial/JTAG)"
+        default y
+        help
+            Read one-line commands from the USB Serial/JTAG port and answer
+            with log lines tagged MBCMD. Used by scripts/device-regress.sh to
+            run the on-device regression without touching the screen:
+            ping / ls / run <app> / stop / heap.
+            The touch and power-key paths are unaffected.
+
 endmenu

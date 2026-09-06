@@ -223,3 +223,131 @@ DOWN/UP を可視化する診断ツールという固有の役割がある。
 
 残留プロセスなし。今回は ALSA も使えており、Phase 11 で出ていた
 `/dev/snd/seq Permission denied` の 2 行も出ていない。
+
+---
+
+## 作業 3: 実機テストの自動化(2026-09-06)
+
+### 事前調査 1: シリアル入力の経路 — **`idf.py monitor` 経由でそのまま届く**
+
+現行のコンソール構成を先に確認した:
+
+| 項目 | 値 |
+|---|---|
+| primary console | **UART0**(`CONFIG_ESP_CONSOLE_UART_DEFAULT`、UART_NUM 0、115200) |
+| secondary console | **USB Serial/JTAG**(`CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG`) |
+| `/dev/ttyACM0` の実体 | ESP32-S3 内蔵 USB Serial/JTAG(起動ログ `rst:0x15 (USB_UART_CHIP_RESET)`) |
+
+ESP-IDF の secondary console は**出力専用**なので、`/dev/ttyACM0` へ送った文字は
+stdin(= UART0)には届かない。そこで **コンソール設定は変更せず、USJ ドライバを
+直接入れて読む**方式を `#ifdef PHASE12_SERIAL_PROBE` で実測した(検証後に削除済み)。
+
+| 確認項目 | 実測結果 |
+|---|---|
+| `usb_serial_jtag_driver_install()` | `ESP_OK`。**ログ出力に影響なし**(secondary console の出力はそのまま出る) |
+| `hpane.sh send esp32-monitor "<text>"` の到達 | **届く**(pane の PTY → `docker run -it` stdin → `idf.py monitor` → シリアル → 実機) |
+| 行末 | **CR(0x0D)のみ**。LF は来ない |
+| 38 文字 × 5 行を待ちなしで連続送信 | **バイト欠落 0** |
+
+→ 代替案(`esp_console` REPL / pyserial 直叩き / コンソールを USJ へ切替)は**いずれも不要**。
+コンソール設定を触らないので、UART0 のログ経路・フラッシュ・リセット挙動に影響しない。
+
+### 事前調査 2〜4 と実装方針(ユーザー承認済み)
+
+- コマンド集合: `ping` / `ls` / `run <app>` / `stop` / `heap`。
+  **応答は `ESP_LOG`(タグ `MBCMD`)で出す。** `printf`(stdout)は primary console
+  = UART0 に出てしまい USB 側に現れないため。
+- アプリ内 UI 操作の自動化は v1 のスコープ外(設計案は下記)。
+- ログの機械判定は `scripts/device-regress.conf` に外出し。
+
+### 実装
+
+| ファイル | 内容 |
+|---|---|
+| `src/main/serial_cmd.{hpp,cpp}` | **新規**。USJ ドライバ直読みのコマンドコンソール。`CONFIG_MIDIBOX_SERIAL_CMD`(既定 y)で有効化 |
+| `src/main/Kconfig.projbuild` | `MIDIBOX_SERIAL_CMD` を追加 |
+| `src/main/app_main.cpp` / `CMakeLists.txt` | `serialcmd::Init()` を SD 準備の後に呼ぶ。`esp_driver_usb_serial_jtag` を依存に追加 |
+| `src/components/wasm_runtime/launcher.{hpp,cpp}` | `launcher_launch_by_name()` を追加(メニューのタップを経由しない起動) |
+| `scripts/device-regress.sh` / `.conf` | **新規**。自動回帰スクリプトと設定 |
+| `docs/workflow.md` | §2.2 と §3.4 に自動回帰を追記(以後の既定) |
+
+設計上の制約の充足:
+
+- コンソールタスクの優先度は **2**(audio_player の 3 より低い。教訓 P10-1)。
+- スタックは **静的確保**(`xTaskCreateStatic` + 静的 3KB)。恒久物をヒープから取ると
+  最大連続ブロックを分断する(教訓 6B / 7B-fix)。
+- ロックは LVGL のもの(`launcher_show` と同じ流儀で任意タスクから `lvgl_port_lock(0)`)
+  だけ。**L0 ディスパッチャの portMUX とは共有しない。**
+- **タッチ・電源キーの既存操作系は一切変更していない。**
+
+### 待ち方 — スクロールバック誤マッチの排除(§5 の手続きで承認済み)
+
+`docs/workflow.md` §3.2 は常駐モニタの待ちに `waitfor`(= `herdr wait output`)を
+使っているが、**本フェーズでこの失敗を実際に踏んだ**: モニタ再起動直後の
+`waitfor "app(s) listed"` が**ペインのスクロールバックに残る前回の起動ログに誤マッチ**し、
+まだ起動していないのに起動したと誤判定した(その結果、古いパーティション表のログを
+新しい起動だと読み違えかけた)。§1-2 が禁じている失敗モードそのものである。
+
+`scripts/device-regress.sh` の待ちは、ペイン出力ではなく **`tee` が書くログファイルの
+「今回の待ちを始めた行より後ろ」**に対してのみ行う(`wait_line <pat> <from> <timeout>`)。
+これで古い行への誤マッチが原理的に起こらない。ペインは人間が見るライブ表示として残す。
+
+### 重要な発見: mp3player の「既知の −44B」は**再生経路でのみ出る**
+
+自動回帰の初回実行で mp3player だけが `+0` になり、手動回帰の `−44` と食い違った。
+手動回帰のログを見直すと、**mp3player 実行中にユーザーのタップ(= 再生開始)が
+入っていた**(`TOUCH_CST328` の行が起動 12.5 秒後に並ぶ)。
+
+検証: **無操作のまま 35 秒保持**して起動→停止したところ、`+0`(生データ:
+`captures/phase12-mp3check/`)。`mp3player` の `app_init()` は `hostapi_fs_list` と
+描画しかせず、再生は `handle_tap()` 経由でしか始まらない。
+
+**結論**: −44B は「アプリの起動/停止のリーク」ではなく **MP3 再生経路の挙動**である。
+Phase 9c 以降ずっと「既知の −44B」として扱ってきたが、その発生条件が特定できたのは今回が初めて。
+`scripts/device-regress.conf` の `EXPECT_DELTA` は空にし(全アプリ 0 を要求)、
+**再生経路まで含めた回帰が要るときは `docs/workflow.md` §3.3 の人間操作+カメラで行う**
+(そこでは −44B が出るのが正常)ことをコメントに明記した。
+
+### メモリ基準値の更新(シリアルコマンドを既定 y にしたことによる一度きりの移動)
+
+| 測定点 | 作業 2 まで | 作業 3 以降 | 差分 |
+|---|---|---|---|
+| `Audio_Init` 前 free heap | 151,428 | **147,596** | −3,832(静的 BSS: 3KB スタック + TCB + 行バッファ) |
+| `runtime ready` 時 free heap | 97,800 | **93,968** | −3,832 |
+| アプリ実行時の free heap | 54,008 | **49,160** | −4,848(上記 + USJ ドライバのリングバッファ約 1,016B) |
+| **アプリ実行時の largest free block** | **31,744** | **31,744** | **±0** |
+
+**最大連続ブロックは不変**(静的確保にした狙いどおり)。以後の回帰はこの新基準で行う。
+
+### 自動回帰の結果 — **PASS**(生データ: `captures/phase12-auto/`)
+
+`./scripts/device-regress.sh --task phase12-auto` を 1 回実行。**物理操作なしで完走**。
+
+| アプリ | 開始 free heap | 終了 free heap | 差分 | largest block | 判定 |
+|---|---|---|---|---|---|
+| touch_demo | 49160 | 49160 | +0 | 31744 | PASS |
+| mp3player | 49160 | 49160 | +0 | 31744 | PASS |
+| clicktest | 49160 | 49160 | +0 | 31744 | PASS |
+| metronome | 49160 | 49160 | +0 | 31744 | PASS |
+| midi_loopback | 49160 | 49160 | +0 | 31744 | PASS |
+| seq_smoke | 49160 | 49160 | +0 | 31744 | PASS |
+
+許容外の WARN/ERROR: **0 件**。所要時間は約 100 秒(保持 6 秒 × 5 + 20 秒 + 起動待ち)。
+
+### 手動回帰との一致確認
+
+| 項目 | 手動(作業 2) | 自動(作業 3) | 一致 |
+|---|---|---|---|
+| アプリごとの free heap 差分 | +0(mp3player のみ −44) | 全アプリ +0 | **条件差として説明済み**(上記のとおり −44 は再生操作でのみ発生。自動側は再生しない) |
+| largest free block | 31744 | 31744 | ✔ |
+| WARN/ERROR | 0 | 0 | ✔ |
+| free heap の絶対値 | 54052 / 54008 | 49160 | シリアルコマンド分の一度きりの移動(上表) |
+
+### アプリ内 UI 操作の自動化 — 設計案(別課題)
+
+- 案: シリアルコマンド `ev <type> <param> <x> <y>` で `hostapi_poll_event` が読む
+  イベントキューへ `hostapi_event_t` を直接積む。**Host API にも L0/L1 にも触れず、
+  アプリ側も無改造**で済む。
+- 問題: これは「テストがアプリの画面レイアウト(ボタン座標)に結合する」ことを意味する。
+  実用化にはアプリがボタンの論理名と矩形を公開する仕組み(例: `app_ui_map()` エクスポート)が
+  要り、それ自体が Host API の設計課題になる。**別課題として切り出す。**

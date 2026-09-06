@@ -17,6 +17,7 @@
 #include "wasm_runtime.hpp"
 #include "hostapi.hpp"
 #include "launcher.hpp"
+#include "serial_cmd.hpp"
 
 static const char* TAG = "APP";
 
@@ -89,6 +90,8 @@ extern "C" void app_main()
             wasmrt::launcher_run_cycle_test();
         }
 #endif
+        // シリアルコマンド(回帰自動化用)。ls / run が SD を見るのでこの位置。
+        serialcmd::Init();
         // 失敗時もメニューは出す(エラー表示付き・空リスト)
         wasmrt::launcher_show(status);
         vTaskDelete(nullptr);

@@ -1,4 +1,6 @@
 #pragma once
+
+#include <cstddef>
 #include <cstddef>
 
 namespace wasmrt {
@@ -16,6 +18,12 @@ bool launcher_prepare_sd(char* status, size_t status_len);
 // .wasm の一覧を出す。status_msg は状態行に表示(nullptr なら変更しない)。
 // lvgl_port_lock を取るのでどのタスクからでも呼べる。
 void launcher_show(const char* status_msg);
+
+// 名前(拡張子なし可)で kAppsDir 内のアプリを起動する。メニューのタップを
+// 経由しないので、LVGL タスク以外(シリアルコマンド等)から呼んでよい。
+// 起動できたら true。err には失敗理由(静的文字列)が入る。
+bool launcher_launch_by_name(const char* name, const char** err, char* path_out,
+                             size_t path_out_len);
 
 // wasmrt::app_start に渡す停止コールバック。メニューへ復帰する。
 void launcher_on_app_stopped(const char* error);
