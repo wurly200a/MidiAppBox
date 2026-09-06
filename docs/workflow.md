@@ -274,9 +274,6 @@ min/mean/max・ヒストグラム・外れ値・見かけ BPM の分布・0xFA/0
     --segments auto              # テンポ切替を検出して区間ごとに集計
 ./scripts/midi-clock-probe.sh --analyze-only --task phase13 --label A23 --span 2
                                  # 2 番目の再生区間(0xFA〜0xFC)だけを対象にする
-
-# 送信側打刻のログ(検証ビルドの `PHASE13 TX <us>` 行)から σ を出す
-./scripts/midi-clock-probe.sh --txlog captures/phase13/monitor.log --label D
 ```
 
 - 実体は `tools/midi_clock_probe/`(C の受信プローブ + Python の集計)。
@@ -293,6 +290,9 @@ min/mean/max・ヒストグラム・外れ値・見かけ BPM の分布・0xFA/0
   通るのでぼやける。送信側の σ は検証ビルドの送信打刻(`--txlog`)で見る。
   なお **MIDI DIN は 1 バイト 320µs** なので、それより短い受信間隔が出たら
   配送側でまとめて届いたアーティファクトである(P10-5 と同じ理屈)。
+- **テンポが動いている区間を固定の公称値で判定しないこと。** 外れ値の判定は
+  公称間隔の 1.5 倍 / 0.5 倍なので、テンポ変更中の区間は「欠落」ではなく
+  当然の変化として大量に引っかかる。`--segments auto` で区間に分けてから見る。
 
 ## §4 一巡チェックモード(routine)
 

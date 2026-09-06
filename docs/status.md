@@ -295,3 +295,35 @@ CLAUDE.md から独立して更新する(CLAUDE.md 本体は書き換えない)�
   設定が 2MB。Phase 12 で足りなくなったら seq_smoke の埋め込みを外すか設定を
   見直す。また現在 Linux で ALSA が使えない(リモートデスクトップ経由)ため、
   タイミング測定の前に ALSA が使える状態を用意する必要がある。
+
+- **Phase 13(docs/prompts/phase13.md、metronome を新 API で書き直す = 移行ステップ 3)
+  完了(2026-09-06)。** 詳細は `docs/results/phase13.md`。
+  - `wasm-apps/metronome/` を**音楽時間軸 API(transport / tempomap / seq)だけ**で
+    上書き書き直し。旧経路(`hostapi_click_schedule` / `hostapi_tone_schedule` /
+    `hostapi_midi_send`)は `extern` から外し、`.wasm` の import にも現れない。
+    クリックは `seq_write(port=CLICK / OP_TONE)` で playback tick に予約、
+    MIDI Clock は L1 がグリッドから生成する。`.wasm` は 2,885 → 3,910 B。
+  - **演奏中のテンポ/拍子変更は「`transport_locate(0)` → `at_tick=0` のエントリを上書き」**
+    の即時方式にした(指示書の「次の小節頭に積む」案から変更、承認済み)。理由は
+    (a) 異なる at_tick へ積むとテンポマップ(上限 32)が枯渇する、
+    (b) 長押し連打が 1 小節に 1 回しか効かず旧版の機能を維持できない、の 2 点。
+    旧版の `rearm(now)`(変更した瞬間から小節をやり直す)と同じ意味論になる。
+  - **実測(実機 MIDI OUT → UM-ONE → PC、120bpm・4/4、アイドル 5.5 分 ×3)**:
+    **クロック欠落 0 件 / clocks÷expected 100.00% / 見かけ BPM 単峰 /
+    平均間隔 20832.8µs**。**09c の「約 61% の拍で 1 発欠落」「BPM 二峰性」は消失**。
+    3 回中 1 回だけ外れ値 2 件が出たが、「50ms の空白 → 3µs で 2 発」という並びで、
+    DIN の 1 バイト時間(320µs)より短い間隔は物理的にありえないため受信側
+    (USB/ALSA)の配送アーティファクトと判断(クロック総数は期待値と完全一致)。
+  - 負荷条件(長押しでテンポを 120→237→120 と動かし続けた直後の静粛区間 104.5 秒)でも
+    **欠落 0 / 100.0% / 平均 20832.9µs**。
+  - **測定ツールを新設**: `tools/midi_clock_probe/`(ALSA のカーネル打刻で受信を記録する
+    C プローブ + Python 集計)と `scripts/midi-clock-probe.sh`。使い方は
+    `docs/workflow.md` §3.5。seq_smoke で妥当性を確認済み(Phase 11 の実測値と一致)。
+  - **回帰 PASS**(6 本、free heap 差分 +0、largest block 31744、警告 0)。
+    clicktest は旧経路のまま動作。free heap の水準は 49160 → 49136(−24B、全アプリ同値)。
+  - **スコープ変更(ユーザー判断)**: 条件 B の正規実行・条件 C(演奏中テンポ変更)・
+    条件 D(送信側 σ)・SL MK3 の目視確認はスキップ。条件 D 用の検証コードは
+    実装したが測定しないので削除済み。
+  - 次の候補は移行ステップ 4 / 4b / 5(旧クリック経路の置換・削除、
+    `hostapi_midi_send` の Start/Stop 副作用の削除)。旧経路の残る利用者は
+    clicktest と midi_loopback のみ。

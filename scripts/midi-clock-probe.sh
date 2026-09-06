@@ -12,8 +12,6 @@
 #   ./scripts/midi-clock-probe.sh --analyze-only --task <タスク名> --label <ラベル> \
 #       [--bpm 120] [--from <秒>] [--to <秒>] [--segments auto]
 #       既存 CSV を条件を変えて集計し直す(再測定は不要)
-#   ./scripts/midi-clock-probe.sh --txlog captures/<タスク名>/monitor.log --label D
-#       条件 D(送信側打刻)の σ を出す
 #
 # 出力先は captures/(.gitignore 対象)。生成物はツールのビルド成果物も含め
 # コミットしない。
@@ -35,7 +33,6 @@ SEGMENTS=""
 WAIT=""
 SPAN=""
 ANALYZE_ONLY=0
-TXLOG=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -50,14 +47,9 @@ while [ $# -gt 0 ]; do
         --wait)          WAIT="$2"; shift 2 ;;
         --span)          SPAN="$2"; shift 2 ;;
         --analyze-only)  ANALYZE_ONLY=1; shift ;;
-        --txlog)         TXLOG="$2"; shift 2 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
-
-if [ -n "$TXLOG" ]; then
-    exec python3 "$SRC_DIR/analyze.py" --txlog "$TXLOG" --label "$LABEL"
-fi
 
 [ -n "$TASK" ] || { echo "error: --task is required" >&2; exit 2; }
 OUT_DIR="$REPO/captures/$TASK"

@@ -8,7 +8,7 @@
 
 使い方:
   analyze.py --csv <csv> [--bpm 120] [--from <sec>] [--to <sec>]
-             [--segments auto] [--label <名前>] [--txlog <monitor.log>]
+             [--segments auto] [--span <n>] [--label <名前>]
 
 時刻はすべて「プローブ起動を 0 とする秒」。--from/--to はこの時刻で窓を切る
 (条件 B の「テンポ変更区間を除外する」用)。
@@ -340,58 +340,20 @@ def analyze(rows, bpm, t_from, t_to, label, segments, span_no=None):
     return "\n".join(out)
 
 
-def analyze_txlog(path, label):
-    """条件 D: 検証ビルド(PHASE13_TXLOG_TEST)が出す送信側の集計行を読む。
-
-    行の形式(10 秒窓ごと):
-      PHASE13 TXWIN n=<件数> sd=<µs> mean=<µs> min=<µs> max=<µs> out=<件数>
-    偏差は理想グリッド(120bpm = 20833.333µs)からのずれで、P10-3 の
-    「TX 発火偏差」と同じ量である。
-    """
-    import re as _re
-    pat = _re.compile(r"PHASE13 TXWIN n=(\d+) sd=(-?\d+) mean=(-?\d+) "
-                      r"min=(-?\d+) max=(-?\d+) out=(\d+)")
-    wins = []
-    with open(path, errors="replace") as f:
-        for line in f:
-            m = pat.search(line)
-            if m:
-                wins.append(tuple(int(x) for x in m.groups()))
-    if not wins:
-        return f"### {label}\n\n(PHASE13 TXWIN の行が見つからない: {path})\n"
-    out = [f"### {label}(送信側打刻 / 10 秒窓)\n",
-           "| 窓 | クロック数 | σ (µs) | 平均偏差 (µs) | min (µs) | max (µs) | |偏差|>1ms |",
-           "|---|---|---|---|---|---|---|"]
-    for i, (n, sd, mean, mn, mx, o) in enumerate(wins):
-        out.append(f"| {i} | {n} | **{sd}** | {mean} | {mn} | {mx} | {o} |")
-    sds = [w[1] for w in wins]
-    tot = sum(w[0] for w in wins)
-    out.append("")
-    out.append(f"- 窓数 {len(wins)} / クロック総数 {tot}")
-    out.append(f"- **σ: 最小 {min(sds)} µs / 中央 {sorted(sds)[len(sds)//2]} µs / 最大 {max(sds)} µs**")
-    out.append(f"- |偏差| > 1ms の合計: {sum(w[5] for w in wins)} 件")
-    out.append("")
-    return "\n".join(out)
-
-
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--csv")
+    ap.add_argument("--csv", required=True)
     ap.add_argument("--bpm", type=float, default=120.0)
     ap.add_argument("--from", dest="t_from", type=float, default=None)
     ap.add_argument("--to", dest="t_to", type=float, default=None)
     ap.add_argument("--label", default="measurement")
     ap.add_argument("--segments", default="none", choices=["none", "auto"])
-    ap.add_argument("--txlog")
     ap.add_argument("--span", type=int, default=None,
                     help="この再生区間(1 始まり)だけを対象にする")
     a = ap.parse_args()
 
-    if a.txlog:
-        print(analyze_txlog(a.txlog, a.label))
-        return
     if not a.csv:
-        ap.error("--csv or --txlog is required")
+        ap.error("--csv is required")
     src, rows = read_csv(a.csv)
     if not rows:
         print(f"### {a.label}\n\n(受信イベントなし: {a.csv})")

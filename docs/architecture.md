@@ -338,7 +338,7 @@ docs/results/phase12.md)。
 |---|---|---|
 | 1 | L0/L1 を native に実装(既存経路と並存、まだ誰も使わない) | **完了 2026-09-05**。静的追加 4.6KB、largest free block は 31744 で Phase 10 と一致、既存 7 アプリ回帰なし(`docs/results/phase11.md`) |
 | 2 | Host API 追加(`transport_*` / `tempomap_*` / `seq_*` / `time_us_to_tick`) | **完了 2026-09-06**。12 関数を実機・Linux 双方で検証済み。ロジックは両ホスト共通の `shared/seq_core.c`。既存 API のシグネチャ・挙動は不変(`docs/results/phase11.md`) |
-| 3 | **metronome を新 API で書き直す** | **Phase 12 へ移管**(2026-09-06)。実機は WASM アプリを同時に 1 つしか動かせず「metronome を動かしながら midi_loopback の E1 で測る」が成立しないため、旧版との前後比較ではなく**絶対値目標**(欠落 0 / clocks÷expected = 100% / BPM 単峰 / 平均間隔 20833µs)を達成条件とする。metronome は別ディレクトリを作らず上書きで書き直す |
+| 3 | **metronome を新 API で書き直す** | **完了 2026-09-06(Phase 13)**。旧経路(`hostapi_click_schedule` / `hostapi_tone_schedule` / `hostapi_midi_send`)を `extern` から外し、クリックは `seq_write(port=CLICK)`、MIDI クロックは L1 のグリッド生成に一本化。実機でアイドル 5.5 分 ×3 を測定し、**クロック欠落 0 / clocks÷expected 100.00% / 見かけ BPM 単峰 / 平均間隔 20832.8µs**(9c の「61% の拍で 1 発欠落」が解消)。詳細は `docs/results/phase13.md` |
 | 4 | 既存クリックスケジューラを L0 経由に置換(`hostapi_click_schedule` / `hostapi_tone_schedule` を L0 の薄いラッパにする) | clicktest / metronome(旧版)の回帰なし。内部だけが切り替わる |
 | 4b | **ステップ 4 完了後、`hostapi_click_schedule` / `hostapi_tone_schedule` を削除する** | 全アプリが `seq_write` へ移植済みであること。削除期限は日付ではなく**「ABI を対外的に確定版として公開する時点より前」**(§11-3) |
 | 5 | `hostapi_midi_send` の Start/Stop 副作用(クロック生成トリガ)を削除 | テンポの二重管理が消える。midi_loopback で確認 |
