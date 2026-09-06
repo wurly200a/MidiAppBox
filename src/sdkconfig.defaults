@@ -23,3 +23,22 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Phase 15: PSRAM(8MB octal)を有効にする。目的は WASM の linear memory を
+# internal DRAM の最大連続ブロック(31,744 B = 独立した 32KB 領域の構造的上限)から
+# 切り離すこと。WAMR は CONFIG_SPIRAM が立つと旧名 CONFIG_ESP32S3_SPIRAM_SUPPORT
+# 経由で -DWASM_MEM_DUAL_BUS_MIRROR=1 を付け、os_mmap の確保 caps が
+# MALLOC_CAP_SPIRAM になる(= linear memory が PSRAM から取られる)。
+# 実測: memory_data が 0x3fcf02e8(internal) -> 0x3c101820(PSRAM)。
+# 根拠の全体は docs/results/phase15.md ステップ 0 / docs/design/phase15-psram.md。
+CONFIG_SPIRAM=y
+# OCT / 80MHz は Phase 12 E6 の実績値(この組み合わせで 20/20 連続起動)。
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+# CAPS_ALLOC を選ぶ理由(Phase 15 ステップ 0 の C1 対 C2 実測):
+#  - internal の最大連続ブロックが大きい(40,960 対 31,744)。USE_MALLOC は
+#    SPIRAM_MALLOC_RESERVE_INTERNAL(既定 32,768)が大領域から予約プールを切り出し、
+#    大領域の最大連続が 9,472 まで断片化する。
+#  - malloc() が PSRAM を返さないので、IDF ドライバ内部の一般 malloc が意図せず
+#    PSRAM へ流れる経路がない。PSRAM に置くものは明示した分だけになる。
+CONFIG_SPIRAM_USE_CAPS_ALLOC=y

@@ -309,8 +309,35 @@ t_i ≈ T - (N - 1 - i) × 320µs      (T = ホストが打った代表時刻)
 |---|---|---|
 | L0 キューの配置 | **internal RAM の静的 BSS** | 恒久物は静的確保に(6B/7B-fix の教訓)。ヒープから取ると largest free block を食い潰し WASM の linear memory 確保を壊す(9c で実証済みの失敗モード) |
 | L0 キューの深さ | **4KB = 256 イベント** | 9c の実績: native 側に 12KB 追加で WASM 起動失敗、4KB は問題なし。8KB は未検証 |
-| PSRAM | **当面使わない(封印ではなく延期)** | P10-4: 8MB octal を搭載しているが、有効化すると SD 初期化の SDMMC プローブで TG1WDT リブートループに陥る。ドロップイン変更ではない。**SDMMC ハングの原因調査は独立課題として切り出す**(将来サンプルプレーヤーの波形メモリで PSRAM が必要になった時のため) |
+| PSRAM | **使う(Phase 15 で本番反映)** | 8MB octal / OCT / 80MHz / `SPIRAM_USE_CAPS_ALLOC`。**WASM の linear memory は PSRAM から確保される**(下表)。SDMMC プローブは飛ばして SDSPI 固定(§11-2) |
 | キュー操作のコスト見積 | 定常 ~360ns/op、**負荷時 ~1.4µs/op** | P10-4 の 16B ランダムアクセス実測(mp3 再生中に 3.8 倍へ跳ねる回を観測)。ISR/タイマコールバック内の操作はこの最悪値を見込む |
+
+### PSRAM に置くもの / 置かないもの(Phase 15)
+
+`CONFIG_SPIRAM=y` にしても、**この表の「internal 固定」の行は 1 つも動かない**
+(いずれも静的 BSS か internal 明示確保のため)。§9 の方針は Phase 15 で変わっていない。
+
+| 対象 | 配置 | 機構 | 根拠 |
+|---|---|---|---|
+| **WASM linear memory**(実測 16.5〜73.8KB) | **PSRAM** | `os_mmap()` が `MALLOC_CAP_SPIRAM`(`WASM_MEM_DUAL_BUS_MIRROR`) | Phase 15 の目的。実測アドレス 0x3c101820 |
+| LVGL 描画バッファ(19,200 B ×2) | **PSRAM** | `esp_lvgl_port` の `MALLOC_CAP_DEFAULT` | Phase 15 L-a。`psram_dma_direct=1` とセット(下記) |
+| L0 キュー(4,096 B) | **internal 固定** | `shared/seq_core.c` の静的 BSS | 6B / 7B-fix / 9c |
+| テンポマップ・拍子マップ・L1 の状態 | **internal 固定** | 同上 | 同上 |
+| WAMR プール(49,152 B) | **internal 固定** | `wasm_runtime.cpp` の静的 BSS | 7B-fix |
+| `.wasm` バッファ | **internal**(現状) | `malloc()`(`CAPS_ALLOC` では internal) | Phase 15。**いずれかの `.wasm` が 16KB を超えたら PSRAM へ移す**(B 案) |
+| クリック / シリアルコンソールのタスクスタック | **internal 固定** | `xTaskCreateStatic` + 静的 BSS | 12 |
+| `xTaskCreate` 組のタスクスタック | **internal 固定** | IDF の既定 | `FREERTOS_TASK_CREATE_ALLOW_EXT_MEM` は `xTaskCreateStatic` にしか効かない |
+| DMA ディスクリプタ / I2S バッファ | **internal 固定** | `MALLOC_CAP_DMA` | ESP-IDF の制約 |
+
+**`psram_dma_direct` は必須**: LVGL の描画バッファを PSRAM に置くなら、
+`esp_lcd_panel_io_spi_config_t.flags.psram_dma_direct = 1` を立てること。
+立てないと `spi_master` が転送のたびに **internal の DMA バッファ(最大 19,200 B)を
+一時確保して memcpy** し、PSRAM 化の効果を打ち消す(実測で `largest_int` が
+20,480 B 低下、フラッシュ最悪値が 8,814µs)。
+
+**指標について**: `largest free block` は WASM の可否を表さない。linear memory は
+internal の連続ブロックを使わなくなったので、判定は
+**「`memory_data` のアドレス」と「大きい `.wasm` が起動するか」**で行う(`docs/lessons.md`)。
 
 ### 256 イベントが与える先読み horizon
 

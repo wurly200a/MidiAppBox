@@ -19,6 +19,26 @@ menu "MidiAppBox"
             ping / ls / run <app> / stop / heap.
             The touch and power-key paths are unaffected.
 
+
+    config MIDIBOX_SD_SKIP_SDMMC_PROBE
+        bool "Skip the SDMMC probe and mount the SD card via SDSPI directly"
+        default y if SPIRAM
+        default n
+        help
+            The SDMMC probe in sdcard.cpp has never succeeded on this board; it
+            only fails and falls back to SDSPI. With PSRAM enabled it stops
+            returning at all and the board reboots in a TG1WDT loop
+            (Phase 12 experiment E5). Skipping the probe makes PSRAM usable.
+
+            The cost is that the card is always mounted over SDSPI at
+            11.43 MHz instead of SDMMC at 20 MHz. Before Phase 15 that also cut
+            the internal largest free block from 31,744 to 15,360 and stopped
+            every WASM app from starting; that is no longer a concern because
+            the linear memory now comes from PSRAM.
+
+            Phase 15 step 4 investigates why the probe hangs. Revisit this
+            default once that has an answer.
+
     config MIDIBOX_SCREENSAVER
         bool "Blank the launcher menu when idle (screensaver / backlight off)"
         default y

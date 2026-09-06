@@ -56,10 +56,21 @@ size_t s_line_len = 0;
 
 void cmd_heap()
 {
+    // Phase 15: internal だけでなく PSRAM も出す。linear memory は PSRAM から
+    // 取られるので、internal だけ見ていると PSRAM のリークに気づけない。
+    constexpr uint32_t kInt = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
     ESP_LOGI(TAG, "heap free %u largest %u min %u",
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+             (unsigned)heap_caps_get_free_size(kInt),
+             (unsigned)heap_caps_get_largest_free_block(kInt),
+             (unsigned)heap_caps_get_minimum_free_size(kInt));
+    ESP_LOGI(TAG, "heap free_int=%u largest_int=%u min_int=%u"
+                  " free_psram=%u largest_psram=%u min_psram=%u",
+             (unsigned)heap_caps_get_free_size(kInt),
+             (unsigned)heap_caps_get_largest_free_block(kInt),
+             (unsigned)heap_caps_get_minimum_free_size(kInt),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM));
 }
 
 void cmd_ls()

@@ -139,13 +139,13 @@ for app in $APPS; do
     mark=$(line_count)
     send_cmd "run $app"
     if ! runline=$(wait_line 'MBCMD: run (ok|err)' "$mark" 20); then
-        ROWS+=("| $app | - | - | - | - | FAIL(run 応答なし) |"); overall=1; continue
+        ROWS+=("| $app | - | - | - | - | - | - | FAIL(run 応答なし) |"); overall=1; continue
     fi
     if [[ "$runline" == *"run err"* ]]; then
-        ROWS+=("| $app | - | - | - | - | FAIL(${runline#*MBCMD: }) |"); overall=1; continue
+        ROWS+=("| $app | - | - | - | - | - | - | FAIL(${runline#*MBCMD: }) |"); overall=1; continue
     fi
     if ! wait_line 'app: app_init\(\)' "$mark" 20 >/dev/null; then
-        ROWS+=("| $app | - | - | - | - | FAIL(app_init に到達せず) |"); overall=1; continue
+        ROWS+=("| $app | - | - | - | - | - | - | FAIL(app_init に到達せず) |"); overall=1; continue
     fi
 
     sleep "$hold"
@@ -153,23 +153,45 @@ for app in $APPS; do
     mark=$(line_count)
     send_cmd "stop"
     if ! stopline=$(wait_line 'app: stopped \(' "$mark" 30); then
-        ROWS+=("| $app | - | - | - | - | FAIL(停止しない) |"); overall=1; continue
+        ROWS+=("| $app | - | - | - | - | - | - | FAIL(停止しない) |"); overall=1; continue
     fi
 
-    # I (12345) WASM: app: stopped (ok), free heap 54008 (at start 54052), largest block 31744
-    state=$(sed -n 's/.*app: stopped (\([^)]*\)).*/\1/p'            <<<"$stopline")
-    fin=$(  sed -n 's/.*free heap \([0-9]*\).*/\1/p'                <<<"$stopline")
-    start=$(sed -n 's/.*(at start \([0-9]*\)).*/\1/p'               <<<"$stopline")
-    largest=$(sed -n 's/.*largest block \([0-9]*\).*/\1/p'          <<<"$stopline")
-    delta=$((fin - start))
-    want="${EXPECT_DELTA[$app]:-0}"
+    # I (12345) WASM: app: stopped (ok), free heap 105880 (at start 105880), largest block 57344
+    state=$(sed -n 's/.*app: stopped (\([^)]*\)).*/\1/p' <<<"$stopline")
+
+    # 4 値行(Phase 15)。1 行目の直後に必ず出る。
+    #   app: stopped free_int=N largest_int=N free_psram=N largest_psram=N \
+    #       [start free_int=N free_psram=N]
+    if ! statline=$(wait_line 'app: stopped free_int=' "$mark" 10); then
+        ROWS+=("| $app | - | - | - | - | - | - | FAIL(4 値行が出ない) |"); overall=1; continue
+    fi
+    # free_int / free_psram は行の前半と "[start ...]" の両方に出るので、先に切り分ける
+    # (sed の .* は貪欲で、切らないと最後の出現 = 開始値を拾ってしまう)。
+    head=${statline%%\[start*}
+    st=${statline#*\[start }
+    kv() { sed -n "s/.*$2=\([0-9]*\).*/\1/p" <<<"$1"; }
+    fin_i=$(kv "$head" free_int);     lgst_i=$(kv "$head" largest_int)
+    fin_p=$(kv "$head" free_psram);   lgst_p=$(kv "$head" largest_psram)
+    start_i=$(kv "$st" free_int);     start_p=$(kv "$st" free_psram)
+    d_i=$((fin_i - start_i))
+    d_p=$((fin_p - start_p))
+    want_i="${EXPECT_DELTA[$app]:-0}"
+    want_p="${EXPECT_DELTA_PSRAM[$app]:-0}"
 
     verdict="PASS"
-    [ "$state" != "ok" ]            && { verdict="FAIL(state=$state)"; overall=1; }
-    [ "$delta" != "$want" ]         && { verdict="FAIL(delta=$delta 期待 $want)"; overall=1; }
-    [ "$largest" != "$EXPECT_LARGEST" ] && { verdict="FAIL(largest=$largest 期待 $EXPECT_LARGEST)"; overall=1; }
+    [ "$state" != "ok" ] && { verdict="FAIL(state=$state)"; overall=1; }
+    # リーク検出(差分は厳密一致)
+    [ "$d_i" != "$want_i" ] && { verdict="FAIL(int delta=$d_i 期待 $want_i)"; overall=1; }
+    [ "$d_p" != "$want_p" ] && { verdict="FAIL(psram delta=$d_p 期待 $want_p)"; overall=1; }
+    # 余裕の監視(下限しきい値)
+    [ "$fin_i"  -lt "$MIN_FREE_INT" ] &&
+        { verdict="FAIL(free_int=$fin_i < $MIN_FREE_INT)"; overall=1; }
+    [ "$lgst_i" -lt "$MIN_LARGEST_INT" ] &&
+        { verdict="FAIL(largest_int=$lgst_i < $MIN_LARGEST_INT)"; overall=1; }
+    [ "$fin_p"  -lt "$MIN_FREE_PSRAM" ] &&
+        { verdict="FAIL(free_psram=$fin_p < $MIN_FREE_PSRAM)"; overall=1; }
 
-    ROWS+=("| $app | $start | $fin | $(printf '%+d' "$delta") | $largest | $verdict |")
+    ROWS+=("| $app | $start_i | $fin_i | $(printf '%+d' "$d_i") | $lgst_i | $(printf '%+d' "$d_p") | $lgst_p | $verdict |")
 done
 
 # --- WARN / ERROR の集計 -----------------------------------------------------
@@ -193,8 +215,8 @@ we_bad_n=$(printf '%s' "$we_bad" | grep -ac . || true)
     echo "- ログ: \`captures/$TASK/monitor.log\`"
     echo "- 設定: \`$(realpath --relative-to="$REPO" "$CONF")\`"
     echo
-    echo "| アプリ | 開始 free heap | 終了 free heap | 差分 | largest block | 判定 |"
-    echo "|---|---|---|---|---|---|"
+    echo "| アプリ | 開始 free_int | 終了 free_int | int 差分 | largest_int | psram 差分 | largest_psram | 判定 |"
+    echo "|---|---|---|---|---|---|---|---|"
     printf '%s\n' "${ROWS[@]}"
     echo
     echo "許容外の WARN/ERROR: **${we_bad_n} 件**"

@@ -53,11 +53,14 @@ extern "C" void app_main()
     clockauth::Init();
 
     // hostapi_audio_* 用のフル初期化(esp-audio-player タスク起動、実測 ~47KB)
-    const size_t heap_before_audio = esp_get_free_heap_size();
+    const size_t heap_before_audio =
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     audio::Audio_Init();
     ESP_LOGI(TAG, "Audio_Init: free heap %u -> %u (delta %d)",
-             (unsigned)heap_before_audio, (unsigned)esp_get_free_heap_size(),
-             (int)(heap_before_audio - esp_get_free_heap_size()));
+             (unsigned)heap_before_audio,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (int)(heap_before_audio
+                   - heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
 
     // MIDI OUT の常設初期化(Phase 8a で確認済みの UART1 設定。起動時1回のみ)
     midi::Midi_Init();

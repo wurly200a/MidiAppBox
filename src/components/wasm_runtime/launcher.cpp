@@ -300,8 +300,8 @@ void launcher_run_cycle_test()
     snprintf(path, sizeof(path), "%s/mp3player.wasm", kAppsDir);
 
     ESP_LOGI(TAG, "=== cycle test start: free heap %u largest %u",
-             (unsigned)esp_get_free_heap_size(),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
     for (int i = 1; i <= 10; i++) {
         hostapi_app_screen_create();
@@ -316,8 +316,8 @@ void launcher_run_cycle_test()
         app_request_stop();
         while (app_is_running()) vTaskDelay(pdMS_TO_TICKS(50));
         ESP_LOGI(TAG, "=== cycle %d done: free heap %u largest %u (playing=%d)", i,
-                 (unsigned)esp_get_free_heap_size(),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                  (int)audio::Music_is_playing());
     }
 
@@ -335,7 +335,7 @@ void launcher_run_cycle_test()
         }
         remove(bad);
         ESP_LOGI(TAG, "=== broken.wasm test done: free heap %u",
-                 (unsigned)esp_get_free_heap_size());
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     }
 
     ESP_LOGI(TAG, "=== cycle test end");

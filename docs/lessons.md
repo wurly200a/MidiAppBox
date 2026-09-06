@@ -60,14 +60,22 @@ herdr 運用・ビルド手順そのものの教訓は `docs/workflow.md` に一
   `idf.py monitor` の再起動は RTS/DTR のソフトリセットで **SD カードの電源は落ちない**ため、
   何度リセットしても復帰しない。SD プローブ中のリブートループを繰り返した後に
   この状態へ入った実績がある(12)。
-- PSRAM 有効化で SD がハングする真因は **SDMMC プローブ**だった(ピン競合でも、
-  PSRAM 由来バッファが DMA 経路に渡るのでもない。`SPIRAM_USE_CAPS_ALLOC` でも同じ失敗)。
+- PSRAM 有効化で SD がハングするのは **SDMMC プローブ**の中である(ピン競合ではない)。
   プローブを飛ばせば PSRAM 有効で 20 回連続起動する。ただし飛ばすと常に SDSPI 経路に
   なるので、上記の破綻とセットで考える必要がある(12)。
-- **PSRAM を有効にしても largest free block は増えない。** internal free は
-  64,276 → 106,763 と +42KB 増えるが、最大連続ブロックは 31,744 のまま同一
-  (独立した 32KB DRAM 領域が与える構造的上限)。WASM linear memory の逼迫を
-  緩和するには WAMR プール自体を PSRAM へ移す必要がある(12)。
+  **【Phase 15 で一部訂正】** 「`SPIRAM_USE_CAPS_ALLOC` でも同じ失敗だったから
+  PSRAM 由来バッファが DMA 経路に渡る筋は消えた」という論法は**成立しない**。
+  `CAPS_ALLOC` は `heap_caps_malloc(..., MALLOC_CAP_DEFAULT)` を internal に留めない
+  (下記 Phase 15 の項)ので、ドライバがその形で確保していれば PSRAM のバッファは渡りうる。
+  **この仮説はまだ生きている**(15)。
+- PSRAM を有効にしても `MALLOC_CAP_INTERNAL` の largest free block は 31,744 のまま
+  増えない(独立した 32KB DRAM 領域が与える構造的上限)。internal free は
+  64,276 → 106,763 と +42KB 増える(12)。
+  **【Phase 15 で訂正】** ここから導いた「だから WASM linear memory の逼迫は緩和されず、
+  WAMR プール自体を PSRAM へ移す必要がある」という結論は**誤り**。
+  linear memory はプールではなく `os_mmap()` 経由で確保され、`CONFIG_SPIRAM=y` にした
+  時点で **PSRAM へ移っていた**(だから internal の largest が動かなかった)。
+  WAMR プールを移す必要はなく、`sdkconfig.defaults` の変更だけで足りる(15)。
 - PSRAM の 16B ランダムアクセス実測(-Og): internal 2KB **362 ns/op**、
   PSRAM 4KB(キャッシュ内)**375 ns/op(+3%)**、PSRAM 256KB(キャッシュ超え)
   **874〜966 ns/op(約 2.5 倍)**。キャッシュに収まるなら実質同等で、超えても
@@ -95,6 +103,46 @@ herdr 運用・ビルド手順そのものの教訓は `docs/workflow.md` に一
   (静的 3KB)を足しても**アプリ実行時の largest free block は 31744 のまま不変**
   だった(free heap の水準だけが静的分 −3832B、ドライバのリングバッファ分 −1016B
   移動)(12)。
+
+## PSRAM 本番反映(Phase 15)
+- **`largest free block` は WASM の可否を表す指標ではない。** linear memory は WAMR の
+  プールではなく `os_mmap()` 経由で確保され、**確保先は PSRAM へ変わりうる**
+  (`espidf_memmap.c` は `WASM_MEM_DUAL_BUS_MIRROR` が立つと `MALLOC_CAP_SPIRAM` を使う)。
+  判定は「実際に大きい `.wasm` が起動するか」と「`memory_data` のアドレス」で行う
+  (0x3c/0x3d 台 = PSRAM、0x3fc 台 = internal DRAM)。**Phase 12 が「PSRAM を有効にしても
+  largest が 31,744 のままなので効果なし」と判定したのはこの取り違えで、実際には
+  linear memory はその領域から出て行っていた**(15)。
+- **`CONFIG_SPIRAM=y` だけで WAMR の linear memory は PSRAM へ移る。** IDF のリネーム機構が
+  旧名 `CONFIG_ESP32S3_SPIRAM_SUPPORT` を値付きで `sdkconfig.cmake` に出力し、WAMR の
+  `shared_platform.cmake` がそれを見て `-DWASM_MEM_DUAL_BUS_MIRROR=1` を付けるため。
+  `managed_components/` の書き換えは不要(15)。
+- **`.wasm` の `--initial-memory` を増やしても linear memory は増えない。** WAMR の
+  `WASM_ENABLE_SHRUNK_MEMORY`(既定 1)が `memory.grow` を含まないモジュールの宣言を無視して
+  `num_bytes_per_page = align8(__heap_base)` に潰すため。実サイズは
+  **`align8(__heap_base) + instantiate の heap_size`** で決まり、増やす操作は Rust 側の
+  **`-C link-arg=-zstack-size=N`**(または大きな static)である(15、5 アプリで実測一致)。
+- **`CONFIG_SPIRAM_USE_CAPS_ALLOC` は `heap_caps_malloc(..., MALLOC_CAP_DEFAULT)` を
+  internal に留めない。** `malloc()` の実体 `heap_caps_malloc_default()` だけが
+  `MALLOC_CAP_INTERNAL` を足して呼び直す実装で、`MALLOC_CAP_DEFAULT` を**直接**指定した
+  確保は PSRAM から取れる(LVGL 描画バッファがこれで PSRAM に移った)。
+  「CAPS_ALLOC にしたから PSRAM は明示確保だけ」という理解は誤り(15)。
+- **色バッファが PSRAM にあるとき `esp_lcd_panel_io_spi_config_t.flags.psram_dma_direct`
+  を立てないと、spi_master が転送のたびに internal の DMA バッファを一時確保して memcpy する**
+  (`setup_dma_priv_buffer()`)。実測でフラッシュ 1 回ぶん 19,200 B の internal を食い、
+  `largest_int` が 20,480 B 下がった。立てると internal 消費が 60 B になり、フラッシュの
+  **最悪値も 8,814µs → 1,701µs** に改善する(平均は 663→823µs と悪化するが裾が効く)(15)。
+- **PSRAM 有効時は `esp_get_free_heap_size()` と `MALLOC_CAP_DEFAULT` の largest が
+  PSRAM 込みの 8MB 級になり、「internal の逼迫」も「リーク」も表さなくなる。**
+  回帰のログは internal / PSRAM の 2 系統に分けて出すこと。**linear memory が PSRAM から
+  取られる以上、internal だけ見ていると PSRAM のリークに気づけない**(15)。
+- **回帰の判定で「余裕の監視」と「リーク検出」を混ぜない。** 前者は下限しきい値
+  (`largest_int` はアプリごとに違いうるので固定値一致にすると偽 FAIL を作る)、
+  後者は開始→終了の差分の厳密一致。Phase 14 までの `EXPECT_LARGEST` 固定値一致は
+  この 2 つを混ぜていた(15)。
+- **4 値ログをスクリプトで読むときは、同じ語が 1 行に 2 回出ることに注意。**
+  `free_int=` は前半と末尾の `[start …]` の両方にあり、`sed` の `.*` は貪欲なので
+  切り分けずに読むと**最後の出現 = 開始値**を拾い、差分が常に 0 になって
+  **リーク検出が黙って無効化される**(15)。
 
 ## ホスト共通(Phase 11 で得たもの)
 - 実機と Linux ホストで**同じロジックを二重に書かない**。L0/L1 は

@@ -5,6 +5,9 @@
 #include "esp_lcd_panel_vendor.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
+#include <algorithm>
+#include "esp_timer.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
 #include "esp_lvgl_port.h"
@@ -13,6 +16,51 @@
 static const char* TAG_DISP = "DISPLAY";
 
 static bool s_backlight_on = false;
+
+// ---- Phase 15 T-2(常設): LVGL のフラッシュ所要時間 ----
+//
+// 描画バッファが PSRAM に移ったので、フラッシュ 1 回あたりのコストを記録する。
+// LV_EVENT_FLUSH_START〜FLUSH_FINISH は **flush コールバックの呼び出し時間**で、
+// SPI の DMA 完了までは含まない(完了は on_color_trans_done)。つまりここに出るのは
+// キュー投入と、PSRAM バウンスが起きている場合の memcpy のコストである。
+// 判定は絶対値ではなく記録が目的。ただし app_tick の最大実行時間が 100ms の
+// tick 周期を脅かす水準なら報告して止める(docs/design/phase15-psram.md §3-4)。
+namespace {
+
+constexpr int kFlushSamples = 1000;
+int64_t  s_flush_start_us = 0;
+uint32_t s_flush_us[kFlushSamples];
+int      s_flush_n = 0;
+
+void flush_log_stats()
+{
+    uint64_t sum = 0;
+    for (int i = 0; i < kFlushSamples; i++) sum += s_flush_us[i];
+    std::sort(s_flush_us, s_flush_us + kFlushSamples);
+    ESP_LOGI(TAG_DISP,
+             "lvgl flush: min=%u avg=%u p50=%u p95=%u p99=%u max=%u us (n=%d)",
+             (unsigned)s_flush_us[0], (unsigned)(sum / kFlushSamples),
+             (unsigned)s_flush_us[kFlushSamples / 2],
+             (unsigned)s_flush_us[(int)(kFlushSamples * 0.95)],
+             (unsigned)s_flush_us[(int)(kFlushSamples * 0.99)],
+             (unsigned)s_flush_us[kFlushSamples - 1], kFlushSamples);
+}
+
+void on_flush_start(lv_event_t*) { s_flush_start_us = esp_timer_get_time(); }
+
+void on_flush_finish(lv_event_t*)
+{
+    if (s_flush_start_us == 0) return;
+    s_flush_us[s_flush_n++] = (uint32_t)(esp_timer_get_time() - s_flush_start_us);
+    s_flush_start_us = 0;
+    if (s_flush_n == kFlushSamples) {
+        flush_log_stats();
+        s_flush_n = 0;
+    }
+}
+
+} // namespace
+
 
 void display_backlight_set(bool on)
 {
@@ -46,6 +94,14 @@ void Display::init() {
     io_config.trans_queue_depth = 10;
     io_config.lcd_cmd_bits = 8;
     io_config.lcd_param_bits = 8;
+    // Phase 15: PSRAM を有効にすると LVGL の描画バッファは MALLOC_CAP_DEFAULT 経由で
+    // PSRAM に置かれる。このフラグを立てないと esp_lcd は SPI_TRANS_DMA_USE_PSRAM を
+    // 付けず、spi_master が転送のたびに **internal の DMA バッファを一時確保して
+    // memcpy する**(最大でフラッシュ 1 回ぶん = 240*40*2 = 19,200 B)。
+    // それでは internal を空けた意味がないので直結させる。SPI2_HOST なので
+    // 「SPI3 は外部メモリ非対応」の制約にも当たらない。
+    // 詳細は docs/design/phase15-psram.md §3-2/§3-3。
+    io_config.flags.psram_dma_direct = 1;
 //    io_config.spi_mode = 0;
 //    io_config.pclk_hz = 26 * 1000 * 1000;
     esp_lcd_panel_io_handle_t io_handle = nullptr;
@@ -92,8 +148,35 @@ void Display::init() {
     disp_cfg.io_handle     = io_handle;     // added
     disp_cfg.panel_handle  = panel_handle;  // unchanged
 
+    // Phase 15(常設): 描画バッファが internal と PSRAM のどちらから出たかを記録する。
+    // lv_display_get_buf_active() は片面しか返さないので、確保前後の free の差分と
+    // 併せて「2 面ぶんが本当に PSRAM から出たか」を確定できるようにしておく。
+    constexpr uint32_t kCapsInt = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    const size_t int_before   = heap_caps_get_free_size(kCapsInt);
+    const size_t psram_before = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+
     disp_ = lvgl_port_add_disp(&disp_cfg);
     assert(disp_);
+
+    {
+        const size_t int_after   = heap_caps_get_free_size(kCapsInt);
+        const size_t psram_after = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        const lv_draw_buf_t* buf = lv_display_get_buf_active(disp_);
+        const void* data = buf ? buf->data : nullptr;
+        const uintptr_t a = (uintptr_t)data;
+        const char* where = (a >= 0x3C000000u && a < 0x3E000000u) ? "PSRAM"
+                          : (a >= 0x3FC00000u && a < 0x3FD00000u) ? "internal DRAM"
+                                                                  : "?";
+        ESP_LOGI(TAG_DISP,
+                 "lvgl draw buf: active %p (%s) size %u, cfg %u B x2, "
+                 "internal %d B, psram %d B",
+                 data, where, (unsigned)(buf ? buf->data_size : 0),
+                 (unsigned)(disp_cfg.buffer_size * 2),
+                 (int)(int_before - int_after), (int)(psram_before - psram_after));
+    }
+
+    lv_display_add_event_cb(disp_, on_flush_start, LV_EVENT_FLUSH_START, nullptr);
+    lv_display_add_event_cb(disp_, on_flush_finish, LV_EVENT_FLUSH_FINISH, nullptr);
 
     // Backlight ON
     display_backlight_set(true);

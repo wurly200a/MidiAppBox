@@ -28,6 +28,40 @@ static uint8_t s_wamr_heap[48 * 1024];
 
 namespace wasmrt {
 
+// ---- Phase 15: メモリ報告のヘルパ(常設)----
+//
+// PSRAM を有効にすると esp_get_free_heap_size() と MALLOC_CAP_DEFAULT の
+// largest free block は PSRAM を含んだ 8MB 級の値になり、「internal が枯れて
+// いないか」「リークしていないか」のどちらも表さなくなる。回帰が見たいのは
+// その 2 つなので、報告は internal / PSRAM の 2 系統に分けて出す。
+// 詳細は docs/design/phase15-psram.md §4。
+
+namespace {
+
+constexpr uint32_t kCapsInt = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+
+const char* heap_mem_where(const void* p)
+{
+    const uintptr_t a = (uintptr_t)p;
+    if (a >= 0x3C000000u && a < 0x3E000000u) return "PSRAM";
+    if (a >= 0x3FC00000u && a < 0x3FD00000u) return "internal DRAM";
+    return "?";
+}
+
+void log_heap(const char* what)
+{
+    ESP_LOGI(TAG, "%s: free_int=%u largest_int=%u free_psram=%u largest_psram=%u",
+             what,
+             (unsigned)heap_caps_get_free_size(kCapsInt),
+             (unsigned)heap_caps_get_largest_free_block(kCapsInt),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+}
+
+} // namespace
+
+
+
 // ---- tick ジッタ計測(常設。Phase 4 §2 由来)----
 
 namespace {
@@ -69,7 +103,7 @@ bool runtime_init()
         return false;
     }
     ESP_LOGI(TAG, "runtime ready (pool %u bytes), free heap %u",
-             (unsigned)sizeof(s_wamr_heap), (unsigned)esp_get_free_heap_size());
+             (unsigned)sizeof(s_wamr_heap), (unsigned)heap_caps_get_free_size(kCapsInt));
     return true;
 }
 
@@ -112,7 +146,8 @@ uint8_t* read_wasm_file(const char* path, uint32_t* out_size)
 
 void* app_thread(void*)
 {
-    const size_t heap_at_start = esp_get_free_heap_size();
+    const size_t free_int_at_start = heap_caps_get_free_size(kCapsInt);
+    const size_t free_psram_at_start = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     const char* error = nullptr;
     char error_buf[128];
 
@@ -153,6 +188,28 @@ void* app_thread(void*)
             break;
         }
 
+        // Phase 15(常設): linear memory の確保先を毎回ログに残す。
+        // 先頭バイトが 0x3c/0x3d なら PSRAM、0x3fc なら internal DRAM。
+        // **largest free block は WASM の可否を表さない**(Phase 15 の教訓)ので、
+        // 「PSRAM から取れているか」はこのアドレスで見張る。将来 WAMR / IDF の
+        // 更新で os_mmap の確保 caps が変わったら、ここが 0x3fc… に戻って気づける。
+        {
+            wasm_memory_inst_t mem = wasm_runtime_get_memory(inst, 0);
+            if (mem) {
+                const uint64_t pages = wasm_memory_get_cur_page_count(mem);
+                const uint64_t bpp = wasm_memory_get_bytes_per_page(mem);
+                ESP_LOGI(TAG, "app: linear memory %p size %llu (%s), wasm buf %p size %u",
+                         wasm_memory_get_base_address(mem),
+                         (unsigned long long)(pages * bpp),
+                         heap_mem_where(wasm_memory_get_base_address(mem)),
+                         (void*)wasm_buf, (unsigned)wasm_size);
+            }
+            else {
+                ESP_LOGW(TAG, "app: wasm_runtime_get_memory(0) returned NULL");
+            }
+            log_heap("app: started");
+        }
+
         wasm_function_inst_t fn_init = wasm_runtime_lookup_function(inst, "app_init");
         wasm_function_inst_t fn_tick = wasm_runtime_lookup_function(inst, "app_tick");
         wasm_function_inst_t fn_exit = wasm_runtime_lookup_function(inst, "app_exit");
@@ -169,7 +226,7 @@ void* app_thread(void*)
             break;
         }
         ESP_LOGI(TAG, "app: app_init() = %d, free heap %u, tick loop start",
-                 (int)argv[0], (unsigned)esp_get_free_heap_size());
+                 (int)argv[0], (unsigned)heap_caps_get_free_size(kCapsInt));
 
 #if CONFIG_WAMR_ENABLE_MEMORY_PROFILING
         wasm_runtime_dump_mem_consumption(exec_env);
@@ -225,10 +282,22 @@ void* app_thread(void*)
     if (module) wasm_runtime_unload(module);
     if (wasm_buf) free(wasm_buf);
 
+    // 1 行目は device-regress.sh が読む書式(free heap / largest block の語を維持)。
+    // Phase 15 で値の意味を **internal 基準**へ改めた(PSRAM 込みの合計では
+    // internal の逼迫もリークも見えないため)。2 行目が 4 値の正本。
     ESP_LOGI(TAG, "app: stopped (%s), free heap %u (at start %u), largest block %u",
-             error ? error : "ok", (unsigned)esp_get_free_heap_size(),
-             (unsigned)heap_at_start,
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+             error ? error : "ok",
+             (unsigned)heap_caps_get_free_size(kCapsInt),
+             (unsigned)free_int_at_start,
+             (unsigned)heap_caps_get_largest_free_block(kCapsInt));
+    ESP_LOGI(TAG,
+             "app: stopped free_int=%u largest_int=%u free_psram=%u largest_psram=%u"
+             " [start free_int=%u free_psram=%u]",
+             (unsigned)heap_caps_get_free_size(kCapsInt),
+             (unsigned)heap_caps_get_largest_free_block(kCapsInt),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
+             (unsigned)free_int_at_start, (unsigned)free_psram_at_start);
 
     // コールバック完了後に Idle へ遷移する(Idle を見て次のアプリを起動する側と、
     // コールバック内の画面後始末が競合しないように)

@@ -361,3 +361,39 @@ CLAUDE.md から独立して更新する(CLAUDE.md 本体は書き換えない)�
   - **次の候補**: 移行ステップ 6(内蔵音源のポート追加)。PSRAM の本番反映は
     Phase 12 の「条件付き go」のまま別フェーズ。`hostapi_midi_recv` の
     タイムスタンプ線速補正(docs/hostapi.md §7)も未実施のまま持ち越し。
+
+- **Phase 15(docs/prompts/phase15.md、PSRAM 本番反映 = WASM linear memory の
+  PSRAM 移行)進行中・中断(2026-09-06)。** 詳細は `docs/results/phase15.md`、
+  設計は `docs/design/phase15-psram.md`。
+  - **Phase 12 の「PSRAM を有効にしても効果なし」判定は誤りだった。** largest free block が
+    31,744 のまま動かなかったのは事実だが、**linear memory がその領域から出て PSRAM へ
+    移っていた**からである。当時 `memory_data` のアドレスを見ていなかったため気づけなかった。
+  - **採用: A 案 + `CONFIG_SPIRAM_USE_CAPS_ALLOC`**(`sdkconfig.defaults` のみの変更)。
+    `CONFIG_SPIRAM=y` にすると IDF のリネーム機構が旧名 `CONFIG_ESP32S3_SPIRAM_SUPPORT` を
+    立て、WAMR が `-DWASM_MEM_DUAL_BUS_MIRROR=1` を付け、`os_mmap` が
+    `MALLOC_CAP_SPIRAM` を使う。**`managed_components/` の書き換えは不要。**
+  - **T-3 達成**: `-zstack-size` を上げた `touch_demo` で linear memory
+    **73,840 B**(internal largest 57,344 超)と **8,257,136 B**(PSRAM largest の 400B 下)が
+    実機で起動。8,396,912 B は失敗。**上限は PSRAM の最大連続ブロックで決まる**(基準の約 500 倍)。
+  - **`--initial-memory` を上げても効かない**(WAMR の `WASM_ENABLE_SHRUNK_MEMORY` が潰す)。
+    実サイズは `align8(__heap_base) + instantiate の heap_size`。
+  - 実測(アプリ実行中): `free_int` 105,880 / `largest_int` 57,344 /
+    `free_psram` 8,316,904。5 アプリとも int・psram 差分 0、WARN/ERROR 0 件。
+  - **LVGL 描画バッファは PSRAM へ移る**(自動)。`psram_dma_direct = 1` を立てないと
+    spi_master が転送のたび internal に 19,200 B のバウンスを取る(実測 `largest_int` −20,480B)。
+  - **回帰の指標を internal / PSRAM の 4 値に改訂**(`app: stopped free_int=… largest_int=…
+    free_psram=… largest_psram=…`)。判定を「余裕の監視 = 下限しきい値」と
+    「リーク検出 = 差分の厳密一致」に分離した(`scripts/device-regress.{sh,conf}`)。
+  - **既知の穴(本フェーズで新設した監視の未完部分)**: **PSRAM のリーク監視は
+    「1 回の起動→停止の差分」までで、同一アプリを N 回反復したときの非減少判定
+    (4c)は未実装。** linear memory が PSRAM から取られる以上ここは実質的な監視点なので、
+    次フェーズで入れること。
+  - **未実施: T-1(MIDI クロック)・T-2 の `app_tick` 統計・T-4(20 回連続。1/20 で中断)・
+    ステップ 3 のカメラ目視確認・ステップ 4(SDMMC と PSRAM の共存)。**
+    **main は PSRAM 有効のまま残しているが、T-1 が未検証**であることに注意
+    (指示書は「T-1 が不合格なら PSRAM 無効に戻す」としている)。
+  - ステップ 4 への申し送り: **H1(ピン競合)は否定**(SDMMC は CLK=14/CMD=17/D0=16、
+    octal PSRAM は GPIO 33〜37)。**H5(PSRAM 由来バッファが DMA 経路へ)は生きている** —
+    Phase 12 は `CAPS_ALLOC` でも同じ失敗だったことを根拠に否定したが、
+    **`CAPS_ALLOC` は `heap_caps_malloc(..., MALLOC_CAP_DEFAULT)` を internal に留めない**
+    (`malloc()` の実体だけが `MALLOC_CAP_INTERNAL` を足して呼び直す実装)。
