@@ -19,4 +19,33 @@ menu "MidiAppBox"
             ping / ls / run <app> / stop / heap.
             The touch and power-key paths are unaffected.
 
+    config MIDIBOX_SCREENSAVER
+        bool "Blank the launcher menu when idle (screensaver / backlight off)"
+        default y
+        help
+            While the launcher menu is on screen (no WASM app running), show a
+            black screensaver with a slowly drifting dot after
+            MIDIBOX_SCREENSAVER_SEC without a touch, then turn the LCD
+            backlight off after MIDIBOX_BACKLIGHT_OFF_SEC. This avoids the
+            image retention that a permanently displayed menu causes.
+            A touch (or a short power-key press) restores the menu; the waking
+            touch is swallowed by the screensaver overlay so it cannot launch
+            an app by accident. Running apps are never affected: the timers
+            only act while the menu screen is the active screen.
+
+    config MIDIBOX_SCREENSAVER_SEC
+        int "Idle seconds before the screensaver starts"
+        depends on MIDIBOX_SCREENSAVER
+        range 5 3600
+        default 60
+
+    config MIDIBOX_BACKLIGHT_OFF_SEC
+        int "Idle seconds before the backlight turns off"
+        depends on MIDIBOX_SCREENSAVER
+        range 5 7200
+        default 180
+        help
+            Counted from the same idle timer as the screensaver, so it must be
+            larger than MIDIBOX_SCREENSAVER_SEC to have a screensaver stage.
+
 endmenu

@@ -12,13 +12,23 @@
 
 static const char* TAG_DISP = "DISPLAY";
 
+static bool s_backlight_on = false;
+
+void display_backlight_set(bool on)
+{
+    gpio_set_level(PIN_LCD_BL, on ? 1 : 0);
+    s_backlight_on = on;
+}
+
+bool display_backlight_is_on() { return s_backlight_on; }
+
 void Display::init() {
     // BL pin
     gpio_config_t io{};
     io.mode = GPIO_MODE_OUTPUT;
     io.pin_bit_mask = 1ULL << PIN_LCD_BL;
     gpio_config(&io);
-    gpio_set_level(PIN_LCD_BL, 0);
+    display_backlight_set(false);
 
     // SPI bus
     spi_bus_config_t buscfg = {};
@@ -86,7 +96,7 @@ void Display::init() {
     assert(disp_);
 
     // Backlight ON
-    gpio_set_level(PIN_LCD_BL, 1);
+    display_backlight_set(true);
     ESP_LOGI(TAG_DISP, "Display initialized");
 //    probe_color_quadrants(panel_handle, /*H=*/LCD_H_RES, /*V=*/LCD_V_RES);    
 }

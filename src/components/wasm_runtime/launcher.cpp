@@ -2,6 +2,7 @@
 #include "launcher.hpp"
 #include "wasm_runtime.hpp"
 #include "hostapi.hpp"
+#include "screensaver.hpp"
 
 #include "sdcard.hpp"
 #include "audio.hpp"
@@ -142,6 +143,9 @@ void create_menu_locked()
     lv_obj_set_pos(s_status_lbl, 10, 204);
     lv_label_set_long_mode(s_status_lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(s_status_lbl, 300);
+
+    // 無操作時のスクリーンセーバー/消灯(このメニュー画面のときだけ働く)
+    wasmrt::screensaver_attach(s_menu_screen);
 }
 
 // lvgl_port_lock 下で呼ぶこと。kAppsDir を読み直して行を作る。
@@ -244,6 +248,7 @@ void launcher_show(const char* status_msg)
     // 呼び出し元のメッセージを優先(再スキャンの汎用メッセージより後に設定)
     if (status_msg) lv_label_set_text(s_status_lbl, status_msg);
     lv_screen_load(s_menu_screen);
+    screensaver_wake_locked();   // 消灯中に戻ってきても必ず点灯・無操作時間リセット
     lvgl_port_unlock();
 }
 
@@ -265,6 +270,7 @@ bool launcher_launch_by_name(const char* name, const char** err, char* path_out,
     if (app_is_running()) { *err = "another app is running"; return false; }
 
     ESP_LOGI(TAG, "launch: %s", path);
+    screensaver_wake();
     hostapi_app_screen_create();
     if (!app_start(path, launcher_on_app_stopped)) {
         // 起動できなければメニューへ戻す(launcher_show が lock を取る)

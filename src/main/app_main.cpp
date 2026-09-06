@@ -17,6 +17,7 @@
 #include "wasm_runtime.hpp"
 #include "hostapi.hpp"
 #include "launcher.hpp"
+#include "screensaver.hpp"
 #include "serial_cmd.hpp"
 
 static const char* TAG = "APP";
@@ -76,7 +77,11 @@ extern "C" void app_main()
 
     // power_key 短押し = ホームボタン(実行中アプリに停止要求 → メニュー復帰)。
     // コールバックは power_key タスク(小スタック)上なので atomic 操作のみ。
-    pwr.set_on_short_press([](void*) { wasmrt::app_request_stop(); }, nullptr);
+    // 消灯中の短押しは「復帰」も兼ねる(要求フラグを立てるだけ。LVGL には触らない)
+    pwr.set_on_short_press([](void*) {
+        wasmrt::screensaver_request_wake();
+        wasmrt::app_request_stop();
+    }, nullptr);
 
     // SD 準備+メニュー表示は FATFS 用に十分なスタックを持つタスクで行う
     auto boot_task = [](void*) {
