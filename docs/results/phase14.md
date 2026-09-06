@@ -240,3 +240,52 @@ git grep -n "click_schedule\|tone_schedule" -- src hosts shared wasm-apps
 
 全アプリで `app_init=0` → `app started` → (ESC) → `app stopped`、警告・エラー
 0 行、残留プロセスなし。
+
+## ステップ 4: `hostapi_midi_send` の Start/Stop 副作用と旧クロック生成器を削除する
+
+### 削除した内容
+
+| 対象 | 削除したもの |
+|---|---|
+| 実機 `src/components/midi/midi.cpp` | 単独バイトの 0xFA/0xFB/0xFC を見てクロック生成を開始/停止する分岐(`Midi_Send` 内)。`Midi_NotifyBeatScheduled` / `Midi_NotifyBeatFired` の**定義**。クロック生成タイマとテンポ逆算の状態(`s_mux` / `s_clock_running` / `s_last_target_ms` / `s_next_period_ms` / `s_clock_timer`)、`clock_timer_cb()` / `clock_timer_ensure()` / `clock_timer_stop()`、`kClockPpqn` / `kMinClockIntervalUs` |
+| 実機 `src/components/midi/midi.hpp` | 上記の宣言(`Midi_NotifyBeatScheduled` / `Midi_NotifyBeatFired`)とヘッダコメント。`Midi_Send` / `Midi_Reset` のコメントを実装どおりに更新 |
+| Linux `hosts/linux/hostapi_midi.c` | 同型の状態(`s_clock_running` / `s_last_target_ms` / `s_next_period_ms` / `s_clock_timer`)、`clock_timer_cb()`、`host_midi_notify_beat_scheduled()` / `host_midi_notify_beat_fired()` の**定義**、`native_hostapi_midi_send` 内の Start/Stop 検出分岐、`CLOCK_PPQN` / `MIN_CLOCK_INTERVAL_MS` |
+| Linux `hosts/linux/hostapi_midi.h` | `host_midi_notify_beat_scheduled` / `host_midi_notify_beat_fired` の宣言。`host_midi_reset` のコメントを実装どおりに更新 |
+| `shared/hostapi_defs.h` | `hostapi_midi_send` の副作用の説明を削除し、**「System Realtime の送出は `transport_*` を使うこと」**と明記 |
+
+`Midi_Reset()` / `host_midi_reset()` は MIDI IN 受信リングバッファの破棄のみに縮小した
+(クロック生成の停止は `seq::Reset()` / `host_seq_reset()`(L1/L0)側が担う。
+指示書が想定していた「`Midi_Reset()` が依存していた部分の整理」はこの縮小で完了)。
+
+`seq_smoke`(唯一残る `hostapi_midi_send` の呼び出し元)は CC#119/#120 の
+3 バイトメッセージにしか使っておらず、Start/Stop/Continue は
+`transport_start/stop/continue` から出るため影響を受けないことをソースで確認済み。
+
+### `git grep` による残存確認
+
+```
+git grep -n "NotifyBeat" -- src hosts shared
+```
+
+**該当なし。**
+
+### ビルド確認
+
+実機: `idf.py build` 成功(pre-existing の `midi.cpp` `uart_config_t::flags`
+警告のみ)。Linux ホスト: `cmake --build build` 成功。
+
+### 回帰
+
+**実機(`phase14-step4-regress`、5 本)**
+
+| アプリ | 開始 free heap | 終了 free heap | 差分 | largest block | 判定 |
+|---|---|---|---|---|---|
+| touch_demo | 49288 | 49288 | +0 | 31744 | PASS |
+| mp3player | 49288 | 49288 | +0 | 31744 | PASS |
+| metronome | 49288 | 49288 | +0 | 31744 | PASS |
+| midi_loopback | 49288 | 49288 | +0 | 31744 | PASS |
+| seq_smoke | 49288 | 49288 | +0 | 31744 | PASS |
+
+許容外の WARN/ERROR 0 件、**結果 PASS**。free heap がステップ3の 49220 から
+さらに **+68B** 増えた(`midi.cpp` の `s_clock_timer` ハンドル分)。largest block
+は 31744 のまま不変。

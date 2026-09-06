@@ -2,11 +2,11 @@
 // MIDI OUT(Phase 8b)。Phase 8a で疎通確認済みの回路(GPIO18 = UART1 TX,
 // 31250bps 8N1, 論理反転)を常設の native host 機能として実装する。
 //
-// hostapi_midi_send の生バイト送信に加え、既存のクリック/トーン予約
-// スケジューラ(hostapi.cpp の tone_schedule_impl)からの通知を受けて
-// 24ppqn の MIDI Clock(0xF8)をタイマ駆動で生成する。テンポは新規に
-// 保持せず、予約時刻の差分(直前発音時刻→次回予約時刻)から都度導出する
-// (shared/hostapi_defs.h の "midi" セクション参照)。
+// MIDI Clock(0xF8)の生成はホストの音楽時間軸 API(transport / tempomap、
+// shared/seq_core.c / src/components/seq/)が 40 tick グリッドから直接
+// 行う(docs/architecture.md §5)。ここでの生バイト送信(Midi_Send /
+// Midi_TxBytes)にテンポ逆算・クロック生成の副作用は一切ない(Phase 14 で
+// 旧経路を削除。旧仕様は docs/results/phase09c.md / phase14.md 参照)。
 #include <cstddef>
 #include <cstdint>
 
@@ -17,8 +17,8 @@ namespace midi {
 void Midi_Init();
 
 // bytes をそのまま MIDI OUT へ送信する。1..8 バイト。成功 0 / 失敗 -1。
-// 単独の Start(0xFA)/Continue(0xFB)/Stop(0xFC) を検出したら、内部で
-// 24ppqn クロック生成を開始/停止する。
+// System Realtime の送出(Start/Stop/Continue/Clock を含む)は
+// transport_* を使うこと(こちらは生バイトを渡すだけで副作用を持たない)。
 int32_t Midi_Send(const uint8_t* bytes, size_t len);
 
 // L0 のポート層(Phase 11)からの生バイト送出。Midi_Send と違い Start/Stop の
@@ -30,26 +30,9 @@ int32_t Midi_Send(const uint8_t* bytes, size_t len);
 // 小さく(3〜4 バイト)保ち、大きなバーストは分割して渡すこと。
 void Midi_TxBytes(const uint8_t* bytes, size_t len);
 
-// 既存クリックスケジューラ(hostapi.cpp)からの通知。App 側の呼び出しとは
-// 無関係にクロック生成が停止中(Midi_Send で Start していない)なら no-op。
-//
-// - Midi_NotifyBeatScheduled: 新しい予約時刻 target_ms が確定した。
-//   直前に受け取った予約時刻(発火有無は問わない)との差分を次回のクロック
-//   間隔として staging する(実際に使うのは対応する拍が発音された瞬間)。
-//   「直前発音時刻との差分」ではなく「直前に受け取った予約時刻との差分」を
-//   使うのがポイント: BPM/拍子変更(rearm())は「拍0を今すぐ」を毎回
-//   再予約するため、これは常に既存の予約(未来の時刻)より小さく、
-//   自然に差分が負になって無視される。一方その直後に続けて予約される
-//   「拍1」(新テンポでの本当の次拍)は、この「拍0=今」を基準にした
-//   正しい周期を返す。閾値によるフィルタではなく構造的に誤検出しない。
-// - Midi_NotifyBeatFired: 拍が実際に発音された(fired_ms)。staging 済みの
-//   間隔でクロックタイマを fired_ms 基準に再同期する(毎拍ドリフト補正)。
-void Midi_NotifyBeatScheduled(uint32_t target_ms);
-void Midi_NotifyBeatFired(uint32_t fired_ms);
-
 // アプリのライフサイクルに合わせてリセットする(hostapi_audio_reset() から
-// 呼ぶ)。クロック生成を強制停止し、staging 状態も破棄する。
-// MIDI IN 受信リングバッファ(Phase 9a)も破棄する。
+// 呼ぶ)。MIDI IN 受信リングバッファ(Phase 9a)を破棄する
+// (MIDI Clock 生成は L1/seq::Reset() 側が止める。Phase 14)。
 void Midi_Reset();
 
 // ---- MIDI IN(Phase 9a)----

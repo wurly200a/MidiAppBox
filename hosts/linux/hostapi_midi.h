@@ -16,16 +16,9 @@ bool host_midi_init(void);
 void host_midi_shutdown(void);
 
 /* アプリのライフサイクルに合わせてリセットする(host_sdl_audio_reset() から
- * 呼ぶ)。MIDI Clock 生成を強制停止し、MIDI IN 受信リングバッファ
- * (Phase 9a)も破棄する。 */
+ * 呼ぶ)。MIDI IN 受信リングバッファ(Phase 9a)を破棄する
+ * (MIDI Clock 生成は L1/host_seq_reset() 側が止める。Phase 14)。 */
 void host_midi_reset(void);
-
-/* 既存クリックスケジューラ(hostapi_sdl.c の tone_schedule_impl / audio_callback)
- * からの通知。実機側 midi.hpp の Midi_NotifyBeatScheduled/Fired と同じ契約
- * (「直前に受け取った予約時刻」との差分でテンポを導出するため last_fired は
- * 不要。詳細は実機側 midi.hpp のコメント参照)。 */
-void host_midi_notify_beat_scheduled(uint32_t target_ms);
-void host_midi_notify_beat_fired(uint32_t fired_ms);
 
 /* 起動基準の単調増加 µs クロック(実機の esp_timer_get_time() 相当)。
  * hostapi_midi_recv のタイムスタンプと同一時基であり、Phase 11 の

@@ -110,20 +110,15 @@
  *     MIDI バイト列をそのまま MIDI OUT へ送信する(App drives API: App は
  *     素の MIDI バイト列を渡すだけで、ホストはその意味を強制しない)。
  *     bytes_len は 1..8(範囲外は -1)。MIDI OUT 未初期化でも -1。
+ *     副作用はない(Phase 14 で削除。SysEx・即時 CC・All Notes Off 等の
+ *     素の MIDI バイト送出に使う)。
  *
- *     ただし System Realtime の Start(0xFA)/Continue(0xFB)/Stop(0xFC) を
- *     **単独の1バイトメッセージ**として送ると、ホストはそれをトリガに
- *     内部で 24ppqn の MIDI Clock(0xF8)の生成を開始/停止する。
- *     - クロック生成は app_tick に一切依存しない、host 内部のタイマ駆動。
- *     - テンポは新規に App から伝達しない。既存のクリック/トーン予約
- *       (hostapi_tone_schedule 系, 上記)が毎拍再予約される際の「直前に
- *       発音した時刻」と「次に予約された時刻」の差分から host が導出する。
- *       そのため MIDI Clock は「クリック音を発音している拍の間隔」に
- *       自動的に追従する(二重にテンポを持たない)。
- *     - アプリ破棄時、ホストは MIDI Clock 生成を必ず停止する
- *       (クリック予約のリセットと同じタイミング)。
- *     - Song Position Pointer 等、Continue を位置復帰として使う高度な
- *       同期はスコープ外(v1 では Continue は Start と同じ扱い)。
+ *     **System Realtime(Start/Continue/Stop/Clock)の送出は `transport_*`
+ *     を使うこと。** `hostapi_midi_send` で 0xFA/0xFB/0xFC/0xF8 を単独送信
+ *     しても、二重送出になるだけでクロック生成のトリガにはならない
+ *     (テンポはホストの音楽時間軸 API が一次情報として持つ。
+ *     docs/architecture.md §1 / §5、旧経路は docs/results/phase09c.md /
+ *     phase14.md 参照)。
  *
  *   hostapi_midi_recv(buf_ptr, buf_len) -> n  (Phase 9a)
  *     前回呼び出し以降に MIDI IN で受信した生バイトを、ホストが受信直後に
