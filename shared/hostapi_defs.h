@@ -93,32 +93,16 @@
  *     (1000Hz/30ms/100)、slot 1..7 = 未定義。破棄で消滅。
  *   hostapi_tone_play(slot) -> 0/-1
  *     即時発音。未定義スロットは -1。
- *   hostapi_tone_schedule(slot, time_ms) -> 0/-1
- *     予約発音。予約の契約は hostapi_click_schedule と共通(下記)で、
- *     予約はスロットによらず全体で 1 件。パラメータは予約時にスナップショット
- *     される(発音前に tone_define し直しても発音済み予約には影響しない)。
  *   発音の重なり(前の音が鳴り終わる前の発音)は v2 ではベストエフォート
  *   (単声。実機は直列再生)。ポリフォニーとサンプル再生は将来の音源 API で扱う。
  *
  *   hostapi_play_click()          ≡ hostapi_tone_play(0)
- *   hostapi_click_schedule(t)     ≡ hostapi_tone_schedule(0, t)
- *     (v0/7A 互換。slot 0 を再定義すればこれらの音も変わる)
+ *     (v0 互換。slot 0 を再定義すればこの音も変わる)
  *
- * ============================== misc ==============================
- *
- *   hostapi_click_schedule(time_ms) -> 0/-1  (Phase 7A, v2)
- *     time_ms(hostapi_now_ms() と同一時基)にクリック音を発音するよう予約する。
- *     tick 格子(100ms)より細かいタイミング精度が要る発音のための API
- *     (タイミングクリティカルはネイティブ側、の原則によりスケジューリングを
- *     ホストに移す)。
- *     - 予約はホスト側に常に 1 件のみ。呼ぶたびに置き換える。
- *     - time_ms == 0 は予約キャンセル。
- *     - ホストは最後に発音した予約時刻 last_fired を保持し、
- *       time_ms <= last_fired の予約は無視して 0 を返す(冪等な再予約を許す)。
- *       アプリは毎 tick「次の拍」を再予約するだけでよく、二重発音しない。
- *     - now を過ぎた時刻(ただし last_fired より後)の予約は可及的速やかに発音。
- *     - アプリ破棄時、ホストは予約と last_fired をリセットする。
- *     - v2 では MP3 再生中の予約発音の精度は保証しない(クリックと MP3 は排他前提)。
+ *   予約発音(旧 hostapi_click_schedule / hostapi_tone_schedule、Phase 7A/7C)は
+ *   Phase 14 で削除した。音楽時間軸 API の transport / tempomap / seq
+ *   (下記)に一本化されている。CLICK ポート(port=HOSTAPI_PORT_CLICK)への
+ *   `seq_write` が playback tick 指定の予約発音を担う(docs/hostapi.md §5)。
  *
  * ============================== midi ==============================
  *
@@ -328,10 +312,8 @@ enum {
     /* misc / tone */                     \
     X(hostapi_play_click, "()")           \
     X(hostapi_now_ms, "()i")              \
-    X(hostapi_click_schedule, "(i)i")     \
     X(hostapi_tone_define, "(iiiii)i")    \
     X(hostapi_tone_play, "(i)i")          \
-    X(hostapi_tone_schedule, "(ii)i")     \
     /* midi (Phase 8b / 9a) */             \
     X(hostapi_midi_send, "(*~)i")         \
     X(hostapi_midi_recv, "(*~)i")         \

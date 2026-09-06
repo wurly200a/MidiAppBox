@@ -86,11 +86,6 @@ typedef struct {
 static Voice s_voice;
 
 static uint64_t s_audio_samples;   /* 再生済みフレーム数(音声クロック) */
-static uint32_t s_audio_epoch_ms;  /* サンプル 0 に対応する now_ms */
-static bool s_audio_epoch_set;     /* エポックは最初のコールバックで確定する */
-static uint32_t s_click_pending;   /* 予約時刻(0=なし) */
-static ToneDef s_pending_tone;     /* 予約時のスナップショット */
-static uint32_t s_click_last_fired;
 static bool s_click_asap;          /* 即時発音要求: 次のバッファ先頭で発音 */
 static ToneDef s_asap_tone;
 static int s_master_vol = 98;      /* マスター音量(実機の既定と一致) */
@@ -145,13 +140,6 @@ static void click_record_fire(uint64_t sample)
     }
 }
 
-/* now_ms → 音声クロック上の目標フレーム */
-static uint64_t click_ms_to_sample(uint32_t ms)
-{
-    if (ms <= s_audio_epoch_ms) return 0;
-    return (uint64_t)(ms - s_audio_epoch_ms) * CLICK_RATE / 1000;
-}
-
 /* SDL オーディオスレッドから呼ばれる。stream は 16bit ステレオ */
 static void audio_callback(void* userdata, Uint8* stream, int len)
 {
@@ -161,16 +149,9 @@ static void audio_callback(void* userdata, Uint8* stream, int len)
     const int frames = len / 4;
     const uint64_t buf_start = s_audio_samples;
 
-    /* エポックは最初のコールバックで確定する。pull 型のコールバックは実再生より
-     * バッファ深さぶん先行して呼ばれるため、これで音声クロックが壁時計より
-     * わずかに先行し、「壁時計上は拍を過ぎたが未発火」の窓(アプリの毎 tick
-     * 再予約が未発火の予約を置き換えて拍を落とす競合)が生じない。 */
-    if (!s_audio_epoch_set) {
-        s_audio_epoch_ms = SDL_GetTicks() - s_start_ms;
-        s_audio_epoch_set = true;
-    }
-
-    /* 発火判定: 目標サンプルがこのバッファに入ったらオフセット付きで開始 */
+    /* 発火判定: 即時発音要求があれば、このバッファの先頭で開始する
+     * (予約発音 tone_schedule / click_schedule は Phase 14 で削除。
+     * CLICK ポートの発音は tone_play_impl 経由の即時発音のみ)。 */
     int start_off = -1;
     const ToneDef* start_tone = NULL;
     if (s_click_asap) {
@@ -178,24 +159,6 @@ static void audio_callback(void* userdata, Uint8* stream, int len)
         start_off = 0;
         start_tone = &s_asap_tone;
         click_record_fire(buf_start);
-    } else if (s_click_pending != 0 && s_click_pending > s_click_last_fired) {
-        uint64_t target = click_ms_to_sample(s_click_pending);
-        if (target < buf_start) target = buf_start; /* 過ぎた予約は直ちに */
-        /* セーフティネット: 音声バックエンドのコールバックがバースト的に遅れて
-         * サンプルクロックが壁時計より遅れた場合でも、壁時計で期限が来た予約は
-         * このバッファで発音する(未発火のまま再予約に置き換えられて拍が落ちる
-         * のを防ぐ)。通常はサンプル精度の経路が先に発火する。 */
-        const uint32_t wall_now = SDL_GetTicks() - s_start_ms;
-        const bool wall_due = (s_click_pending <= wall_now);
-        if (target < buf_start + (uint64_t)frames || wall_due) {
-            if (target >= buf_start + (uint64_t)frames) target = buf_start;
-            start_off = (int)(target - buf_start);
-            start_tone = &s_pending_tone;
-            s_click_last_fired = s_click_pending;
-            s_click_pending = 0;
-            click_record_fire(target);
-            host_midi_notify_beat_fired(s_click_last_fired); /* Phase 8b */
-        }
     }
 
     for (int i = 0; i < frames; i++) {
@@ -293,12 +256,10 @@ void host_sdl_audio_reset(void)
 #endif
     s_audio_state = HOSTAPI_AUDIO_STOPPED;
 
-    /* クリック予約・last_fired・トーンパレットもリセット(Phase 7A/7C 契約)。
+    /* トーン発音状態・トーンパレットもリセット(Phase 7A/7C 契約)。
      * マスター音量は既定に戻す(アプリ起動時の初期状態を一定にする) */
     if (s_audio) {
         SDL_LockAudioDevice(s_audio);
-        s_click_pending = 0;
-        s_click_last_fired = 0;
         s_click_asap = false;
         s_voice.remaining = 0;
         s_fire_count = 0;
@@ -798,64 +759,10 @@ void host_click_play_slot(uint32_t slot)
     (void)tone_play_impl((int32_t)slot);
 }
 
-static int32_t tone_schedule_impl(int32_t slot, int32_t time_ms)
-{
-    if (!s_audio) return -1;
-    const uint32_t t = (uint32_t)time_ms;
-    const uint32_t now = SDL_GetTicks() - s_start_ms;
-
-    if (t == 0) { /* キャンセル(slot によらず有効) */
-        SDL_LockAudioDevice(s_audio);
-        s_click_pending = 0;
-        SDL_UnlockAudioDevice(s_audio);
-        return 0;
-    }
-
-    ToneDef tone;
-    if (!tone_lookup(slot, &tone)) return -1;
-
-    bool scheduled = false;
-    bool fire_old = false;
-    uint32_t last_fired_snapshot = 0;
-    SDL_LockAudioDevice(s_audio);
-    if (t > s_click_last_fired) {
-        /* 置き換えガード: 期限到来済みの未発火予約を破棄しない。
-         * 先にその予約を「可及的速やか」に発音扱いにしてから置き換える */
-        if (s_click_pending != 0 && s_click_pending != t &&
-            s_click_pending <= now && s_click_pending > s_click_last_fired) {
-            s_click_last_fired = s_click_pending;
-            s_asap_tone = s_pending_tone;
-            s_click_asap = true;
-            fire_old = true;
-        }
-        s_click_pending = t; /* 置き換え予約(last_fired 以前は無視) */
-        s_pending_tone = tone; /* 予約時スナップショット */
-        scheduled = true;
-        last_fired_snapshot = s_click_last_fired;
-    }
-    SDL_UnlockAudioDevice(s_audio);
-    if (scheduled) {
-        /* Phase 8b: 新しい予約(t)が確定した時点でテンポを staging する。
-         * fire_old で旧予約を発音扱いにする場合は、その通知より先に行う
-         * (旧拍の発音通知が最新テンポを picks up できるように)。 */
-        host_midi_notify_beat_scheduled(t);
-        if (fire_old) {
-            host_midi_notify_beat_fired(last_fired_snapshot);
-        }
-    }
-    return 0;
-}
-
 void native_hostapi_play_click(wasm_exec_env_t exec_env)
 {
     (void)exec_env;
     tone_play_impl(0);
-}
-
-int32_t native_hostapi_click_schedule(wasm_exec_env_t exec_env, int32_t time_ms)
-{
-    (void)exec_env;
-    return tone_schedule_impl(0, time_ms);
 }
 
 int32_t native_hostapi_tone_define(wasm_exec_env_t exec_env, int32_t slot,
@@ -884,13 +791,6 @@ int32_t native_hostapi_tone_play(wasm_exec_env_t exec_env, int32_t slot)
 {
     (void)exec_env;
     return tone_play_impl(slot);
-}
-
-int32_t native_hostapi_tone_schedule(wasm_exec_env_t exec_env, int32_t slot,
-                                     int32_t time_ms)
-{
-    (void)exec_env;
-    return tone_schedule_impl(slot, time_ms);
 }
 
 uint32_t native_hostapi_now_ms(wasm_exec_env_t exec_env)

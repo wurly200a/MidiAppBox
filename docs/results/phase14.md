@@ -185,3 +185,58 @@ clicktest 削除の影響を受けない。
 許容外の WARN/ERROR 0 件、**結果 PASS**。free heap・largest block とも
 ステップ1と同一(clicktest はネイティブ側の常駐状態を持たなかったため、
 フラッシュのみ減って RAM の水準は変化しない)。
+
+## ステップ 3: `hostapi_click_schedule` / `hostapi_tone_schedule` を削除する
+
+利用者ゼロを確認済み(ステップ1・2、および Phase 13 の metronome 移行)のため、
+API 自体・native 実装・関連状態を削除した。
+
+### 削除した内容
+
+| 対象 | 削除したもの |
+|---|---|
+| `shared/hostapi_defs.h` | `HOSTAPI_NATIVE_SYMBOLS` の `hostapi_click_schedule` / `hostapi_tone_schedule` の 2 エントリ。契約を記述していたコメント節(「予約はホスト側に常に1件のみ」「last_fired」等)。`hostapi_tone_schedule` を参照していた `hostapi_tone_play` の説明も併せて整理 |
+| 実機 `src/components/wasm_runtime/hostapi.cpp` | 予約用の状態(`s_click_timer` / `s_click_pending` / `s_click_last_fired` / `s_pending_tone`)、`click_timer_cb()` / `click_timer_ensure()` / `tone_schedule_impl()`、native 実装 `native_hostapi_click_schedule` / `native_hostapi_tone_schedule`。`Midi_NotifyBeatScheduled` / `Midi_NotifyBeatFired` の**呼び出し側**(`tone_schedule_impl` / `click_timer_cb` 内)。`hostapi_audio_reset()` のクリック予約リセット処理と `hostapi_register_natives()` の `click_timer_ensure()` 呼び出しも削除。トーンパレット(`s_tones` / `s_click_mux` / `tone_lookup` / `tone_play_impl` / `native_hostapi_tone_define` / `native_hostapi_tone_play` / `native_hostapi_play_click`)とジッタ統計(`click_record_fire` 等、即時発音 `tone_play` が使い続ける)は残す |
+| Linux `hosts/linux/hostapi_sdl.c` | 予約状態(`s_click_pending` / `s_pending_tone` / `s_click_last_fired`)、エポック換算(`s_audio_epoch_ms` / `s_audio_epoch_set` / `click_ms_to_sample()`)、`audio_callback()` 内の予約発音分岐(即時発音 `s_click_asap` 分岐は残す)、`tone_schedule_impl()`、native 実装 `native_hostapi_click_schedule` / `native_hostapi_tone_schedule`。`host_midi_notify_beat_scheduled` / `host_midi_notify_beat_fired` の**呼び出し側**。`host_sdl_audio_reset()` の予約リセット処理も削除 |
+| Linux `hosts/linux/hostapi_sdl.h` | 上記 2 関数の宣言 |
+
+`docs/hostapi.md` §7 は既に「非推奨化 → 移行ステップ4完了後に削除」の記述があるが、
+本フェーズでステップ4を経ずに 4b(削除)へ直行したため、ステップ5でまとめて
+「削除済み」に更新する(下記ステップ5参照)。
+
+### ビルド確認
+
+- 実機: `idf.py build` 成功(pre-existing の `midi.cpp` `uart_config_t::flags`
+  警告のみ、本フェーズと無関係)。`.wasm` は変更なし(WASM 側は Phase 13/14 で
+  既に旧 API を呼ばなくなっている)。
+- Linux ホスト: `cmake --build build` 成功。
+
+### `git grep` による残存確認
+
+```
+git grep -n "click_schedule\|tone_schedule" -- src hosts shared wasm-apps
+```
+
+残るのはすべて**コメント内の歴史的記述**(Phase 13/14 で何を置き換えたかの説明)
+のみで、宣言・実装は 0 件。
+
+### 回帰
+
+**実機(`phase14-step3-regress`、5 本)**
+
+| アプリ | 開始 free heap | 終了 free heap | 差分 | largest block | 判定 |
+|---|---|---|---|---|---|
+| touch_demo | 49220 | 49220 | +0 | 31744 | PASS |
+| mp3player | 49220 | 49220 | +0 | 31744 | PASS |
+| metronome | 49220 | 49220 | +0 | 31744 | PASS |
+| midi_loopback | 49220 | 49220 | +0 | 31744 | PASS |
+| seq_smoke | 49220 | 49220 | +0 | 31744 | PASS |
+
+許容外の WARN/ERROR 0 件、**結果 PASS**。free heap がステップ2の 49136 から
+**+84B** 増えた(`esp_timer_create` で確保していた `s_click_timer` ハンドルと
+関連状態が無くなったぶん)。largest block は 31744 のまま不変。
+
+**Linux ホスト(5 本、単発実行モード)**
+
+全アプリで `app_init=0` → `app started` → (ESC) → `app stopped`、警告・エラー
+0 行、残留プロセスなし。

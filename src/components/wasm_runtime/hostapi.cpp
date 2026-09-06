@@ -185,12 +185,9 @@ void native_hostapi_fill_rect(wasm_exec_env_t exec_env, int32_t x, int32_t y,
     lvgl_port_unlock();
 }
 
-// ---- トーン予約発音 (Phase 7A/7C) ----
-// 方式(a): esp_timer ワンショット(systimer, µs 分解能、タスクディスパッチ)。
-// 発音自体は audio の専用タスクに依頼するため、どのコンテキストからも軽い。
-esp_timer_handle_t s_click_timer = nullptr;
-uint32_t s_click_pending = 0;    // 予約時刻(0=なし)
-uint32_t s_click_last_fired = 0;
+// ---- トーンパレット (Phase 7C) ----
+// 即時発音のみ(予約発音 hostapi_tone_schedule / hostapi_click_schedule は
+// Phase 14 で削除。音楽時間軸 API の seq_write(port=CLICK) に一本化)。
 portMUX_TYPE s_click_mux = portMUX_INITIALIZER_UNLOCKED;
 
 // トーンパレット (Phase 7C)。アプリセッション状態(reset で初期化)。
@@ -201,7 +198,6 @@ struct ToneDef {
     uint8_t level;
 };
 ToneDef s_tones[HOSTAPI_TONE_SLOTS];
-ToneDef s_pending_tone; // 予約時のスナップショット(s_click_mux 下で参照)
 
 constexpr ToneDef kDefaultClick = {true, 1000, 30, 100};
 
@@ -213,7 +209,7 @@ void tone_table_reset()
     portEXIT_CRITICAL(&s_click_mux);
 }
 
-// ジッタ統計: 発火時刻(µs)を N 発ごとに集計(SCHED/LEGACY 両経路で記録)
+// ジッタ統計: 発火時刻(µs)を N 発ごとに集計(即時発音 tone_play で記録)
 constexpr int kClickStatN = 100;
 int64_t s_click_fire_us[kClickStatN];
 int s_click_fire_count = 0;
@@ -236,38 +232,6 @@ void click_record_fire()
                  dmax / 1000.0, kClickStatN - 1);
         s_click_fire_count = 0;
     }
-}
-
-// esp_timer タスク上で実行される。発火対象は「期限が来ている予約」のみ
-// (置き換え直後に旧期限の発火が走った場合、新予約が未来なら何もしない)。
-void click_timer_cb(void*)
-{
-    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
-    uint32_t t = 0;
-    ToneDef tone{};
-    portENTER_CRITICAL(&s_click_mux);
-    if (s_click_pending != 0 && s_click_pending <= now + 1) {
-        t = s_click_pending;
-        tone = s_pending_tone;
-        s_click_pending = 0;
-        s_click_last_fired = t;
-    }
-    portEXIT_CRITICAL(&s_click_mux);
-    if (t != 0) {
-        click_record_fire();
-        audio::Play_Tone(tone.freq_hz, tone.dur_ms, tone.level);
-        midi::Midi_NotifyBeatFired(t); // Phase 8b: 24ppqn クロックの位相再同期
-    }
-}
-
-void click_timer_ensure()
-{
-    if (s_click_timer) return;
-    esp_timer_create_args_t args = {};
-    args.callback = click_timer_cb;
-    args.name = "wasm_click";
-    args.dispatch_method = ESP_TIMER_TASK;
-    ESP_ERROR_CHECK(esp_timer_create(&args, &s_click_timer));
 }
 
 // slot を解決してコピーを返す(未定義なら false)
@@ -303,72 +267,12 @@ int32_t tone_play_impl(int32_t slot)
     return 0;
 }
 
-int32_t tone_schedule_impl(int32_t slot, int32_t time_ms)
-{
-    if (!s_click_timer) return -1;
-    const uint32_t t = (uint32_t)time_ms;
-
-    if (t == 0) { // キャンセル(slot によらず有効)
-        portENTER_CRITICAL(&s_click_mux);
-        s_click_pending = 0;
-        portEXIT_CRITICAL(&s_click_mux);
-        esp_timer_stop(s_click_timer); // 未アームなら INVALID_STATE(無視)
-        return 0;
-    }
-
-    ToneDef tone;
-    if (!tone_lookup(slot, &tone)) return -1;
-
-    const uint32_t now_pre = (uint32_t)(esp_timer_get_time() / 1000);
-    bool fire_old = false;
-    ToneDef old_tone{};
-    portENTER_CRITICAL(&s_click_mux);
-    if (t <= s_click_last_fired) { // 冪等な再予約: 無視
-        portEXIT_CRITICAL(&s_click_mux);
-        return 0;
-    }
-    // 置き換えガード: 期限到来済みの未発火予約(タイマ発火より先に wasm 側の
-    // 置き換えが来たケース)は破棄せず、ここで発音扱いにしてから置き換える
-    if (s_click_pending != 0 && s_click_pending != t &&
-        s_click_pending <= now_pre && s_click_pending > s_click_last_fired) {
-        s_click_last_fired = s_click_pending;
-        old_tone = s_pending_tone;
-        fire_old = true;
-    }
-    s_click_pending = t; // 置き換え(トーンは予約時スナップショット)
-    s_pending_tone = tone;
-    const uint32_t last_fired_snapshot = s_click_last_fired;
-    portEXIT_CRITICAL(&s_click_mux);
-    // Phase 8b: 新しい予約(t)が確定した時点でテンポを staging する。
-    // fire_old で旧予約を発音扱いにする場合は、その通知より先に行う
-    // (旧拍の発音通知が picks up できるよう、先に最新テンポを渡しておく)。
-    midi::Midi_NotifyBeatScheduled(t);
-    if (fire_old) {
-        click_record_fire();
-        audio::Play_Tone(old_tone.freq_hz, old_tone.dur_ms, old_tone.level);
-        midi::Midi_NotifyBeatFired(last_fired_snapshot);
-    }
-
-    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
-    int64_t delta_us = ((int64_t)t - (int64_t)now) * 1000;
-    if (delta_us < 0) delta_us = 0; // 過ぎた予約は可及的速やかに
-    esp_timer_stop(s_click_timer);
-    esp_timer_start_once(s_click_timer, (uint64_t)delta_us);
-    return 0;
-}
-
 // ---- natives(v0/7A 互換は slot 0 への別名) ----
 
 void native_hostapi_play_click(wasm_exec_env_t exec_env)
 {
     (void)exec_env;
     tone_play_impl(0);
-}
-
-int32_t native_hostapi_click_schedule(wasm_exec_env_t exec_env, int32_t time_ms)
-{
-    (void)exec_env;
-    return tone_schedule_impl(0, time_ms);
 }
 
 int32_t native_hostapi_tone_define(wasm_exec_env_t exec_env, int32_t slot,
@@ -396,13 +300,6 @@ int32_t native_hostapi_tone_play(wasm_exec_env_t exec_env, int32_t slot)
 {
     (void)exec_env;
     return tone_play_impl(slot);
-}
-
-int32_t native_hostapi_tone_schedule(wasm_exec_env_t exec_env, int32_t slot,
-                                     int32_t time_ms)
-{
-    (void)exec_env;
-    return tone_schedule_impl(slot, time_ms);
 }
 
 // ---- MIDI (Phase 8b) ----
@@ -666,12 +563,9 @@ void hostapi_audio_reset()
     audio::Music_stop();
     s_audio_state.store(HOSTAPI_AUDIO_STOPPED);
 
-    // クリック予約・last_fired・統計もリセット (Phase 7A 契約)。
+    // トーン発音統計もリセット (Phase 7A 契約)。
     // マスター音量は既定 98 に戻す(アプリ起動時の初期状態を一定にする)
-    if (s_click_timer) esp_timer_stop(s_click_timer);
     portENTER_CRITICAL(&s_click_mux);
-    s_click_pending = 0;
-    s_click_last_fired = 0;
     s_click_fire_count = 0;
     portEXIT_CRITICAL(&s_click_mux);
     tone_table_reset(); // トーンパレットも初期状態へ (Phase 7C 契約)
@@ -682,7 +576,6 @@ void hostapi_audio_reset()
 
 bool hostapi_register_natives()
 {
-    click_timer_ensure();
     tone_table_reset();
     seq::SetClickHandler(seq_click_handler); // L0 の CLICK ポート (Phase 11)
     if (!wasm_runtime_register_natives(
