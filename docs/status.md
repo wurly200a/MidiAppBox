@@ -85,6 +85,36 @@ CLAUDE.md から独立して更新する(CLAUDE.md 本体は書き換えない)�
   専用の内容なので `docs/results/phase04.md` へ統合(`## 計測結果詳細` 節)し、
   `poc-results.md` は削除。合わせて元の `docs/results/phase01-04.md` は
   `phase01-03.md`(Phase 1〜3)と `phase04.md`(Phase 4)に分割した。
+- Phase 12(docs/prompts/phase12.md、基盤整備)完了(2026-09-06)。詳細は
+  docs/results/phase12.md。
+  - **作業 1 パーティション拡張**: 16MB フラッシュ + `src/partitions.csv`(custom)。
+    nvs / phy_init / factory のオフセットは既定表と同一のまま factory を 1MB → 4MB に拡張。
+    残容量 4,112 B(0%)→ 3,149,840 B(75%)。NVS 消失なし、`erase-flash` 不要。
+    起動警告 `spi_flash: Detected size(16384k) larger than ...` が消えた。
+    予約データ領域は「切らない」を採用(パーティションエントリ 1 個 = internal heap 56B の実測に基づく)。
+  - **作業 2 アプリ整理**: Host API カバレッジ表に基づき 10 本 → **6 本**
+    (touch_demo / mp3player / clicktest / metronome / midi_loopback / seq_smoke)。
+    削除は hello / demo / bars / bench(タグ `pre-app-prune`)。hello・bench 専用の
+    native ハーネス(呼び出し元ゼロ)も削除。フラッシュ削減は 2,512 B で、
+    **容量逼迫の主因は埋め込みではなく Flash Code(634KB)だった**ことを実測で確認。
+  - **作業 3 実機テストの自動化**: USB Serial/JTAG のコマンドコンソール
+    (`CONFIG_MIDIBOX_SERIAL_CMD`、既定 y。ping / ls / run / stop / heap、応答はタグ `MBCMD`)と
+    `scripts/device-regress.sh` を新設。**物理操作なしで 6 本の回帰表が約 100 秒で出る**。
+    以後の回帰はこれを既定とする(docs/workflow.md §2.2 / §3.4)。
+    待ちはペイン出力ではなくログファイルの差分行に対して行う(スクロールバック誤マッチ対策)。
+    副産物として **mp3player の「既知の −44B」は MP3 再生時にだけ出る**ことを特定した。
+  - **作業 4 PSRAM 可否**: 判定 **条件付き go**。P10-4 のリブートループの真因は
+    **SDMMC プローブ**(ピン競合でも DMA バッファ配置でもない)。飛ばせば PSRAM 有効で
+    20/20 連続起動。ただし **PSRAM を有効にしても largest free block は 31,744 のまま増えず**、
+    WASM linear memory の逼迫は緩和されない。PSRAM レイテンシ実測は internal 比 +3%
+    (キャッシュ内)/ 約 2.5 倍(キャッシュ超え)。本番反映は別フェーズ。
+    **main は no-PSRAM 構成**で最終自動回帰に合格(free heap 49160 / largest 31744 / 警告 0)。
+  - **重要な運用上の発見**: `allocate linear memory failed` が出たら SD の初期化経路を疑う。
+    SDMMC(20.00 MHz)なら largest 31744 で正常、SDSPI フォールバック(11.43 MHz)だと
+    15360 に落ちて全アプリが起動しない。**復旧は USB 抜き差しによる電源断**
+    (ソフトリセットでは直らない)。P10-4 の「実際に使われるのは SPI 経路のみ」という
+    記述はこの実測で訂正した。
+
 - Phase 9c(docs/prompts/phase09c.md、MIDI Clock 送信タイミングの再測定と
   欠落要因の特定)完了(2026-08-23)。`wasm-apps/midi_loopback/` に E1
   (ヒストグラム・ロバスト統計・外れ値・見かけBPM分布)を恒久機能として追加、

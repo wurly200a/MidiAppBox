@@ -48,6 +48,31 @@ herdr 運用・ビルド手順そのものの教訓は `docs/workflow.md` に一
   (優先度 3)より低い優先度にすること。優先度 4 のログダンプタスク+再生中の
   タッチ操作(ログ大量出力)の複合で可聴の音切れが出た実績あり(10 P10-1)。
 
+## SD カード / PSRAM(Phase 12)
+- **`allocate linear memory failed` が出たらまず SD の初期化経路を疑う。**
+  この機体は普段 **SDMMC(`Speed: 20.00 MHz`)** でマウントされ、アプリ実行時の
+  largest free block は 31,744。SDMMC が失敗して **SDSPI にフォールバック**すると
+  (`sdmmc_init_ocr: send_op_cond (1) returned 0x107` → `falling back to SDSPI`、
+  `Speed: 11.43 MHz`)、最大連続ブロックがちょうど 16,384 B 減って **15,360** になり、
+  WASM の linear memory(約 20KB 連続)が確保できず全アプリが起動しなくなる。
+  ファームウェアは同一でも起きるので、ヒープの起動時ログだけ見ても気づけない(12)。
+- SD が SDMMC で初期化できない状態に入ったら、**USB を抜き差しして電源を落とす**。
+  `idf.py monitor` の再起動は RTS/DTR のソフトリセットで **SD カードの電源は落ちない**ため、
+  何度リセットしても復帰しない。SD プローブ中のリブートループを繰り返した後に
+  この状態へ入った実績がある(12)。
+- PSRAM 有効化で SD がハングする真因は **SDMMC プローブ**だった(ピン競合でも、
+  PSRAM 由来バッファが DMA 経路に渡るのでもない。`SPIRAM_USE_CAPS_ALLOC` でも同じ失敗)。
+  プローブを飛ばせば PSRAM 有効で 20 回連続起動する。ただし飛ばすと常に SDSPI 経路に
+  なるので、上記の破綻とセットで考える必要がある(12)。
+- **PSRAM を有効にしても largest free block は増えない。** internal free は
+  64,276 → 106,763 と +42KB 増えるが、最大連続ブロックは 31,744 のまま同一
+  (独立した 32KB DRAM 領域が与える構造的上限)。WASM linear memory の逼迫を
+  緩和するには WAMR プール自体を PSRAM へ移す必要がある(12)。
+- PSRAM の 16B ランダムアクセス実測(-Og): internal 2KB **362 ns/op**、
+  PSRAM 4KB(キャッシュ内)**375 ns/op(+3%)**、PSRAM 256KB(キャッシュ超え)
+  **874〜966 ns/op(約 2.5 倍)**。キャッシュに収まるなら実質同等で、超えても
+  internal の負荷時最悪値 1385 ns/op(P10-4)より速い(12)。
+
 ## 実機テストの自動化(Phase 12)
 - ESP32-S3 の `/dev/ttyACM0` は内蔵 USB Serial/JTAG。ESP-IDF の
   **secondary console は出力専用**なので、primary=UART0 の構成のままだと

@@ -351,3 +351,237 @@ Phase 9c 以降ずっと「既知の −44B」として扱ってきたが、そ�
 - 問題: これは「テストがアプリの画面レイアウト(ボタン座標)に結合する」ことを意味する。
   実用化にはアプリがボタンの論理名と矩形を公開する仕組み(例: `app_ui_map()` エクスポート)が
   要り、それ自体が Host API の設計課題になる。**別課題として切り出す。**
+
+---
+
+## 作業 4: PSRAM の使用可否(2026-09-06)— 判定 **条件付き go**
+
+生データ: `captures/phase12/psram-e2.log` / `psram-e3.log` / `psram-e5.log` /
+`psram-bench.log` / `reboot-loop/boot1..20.log`、`captures/phase12-psram-internal/`。
+
+### 仮説と実験の対応表
+
+| 実験 | 仮説 | 条件 | 結果 |
+|---|---|---|---|
+| E1 | **H1 ピン競合** | 静的解析(`board_pins.hpp` + `audio.cpp`) | **否定** |
+| E2 | **H4 WDT は SD 以外で発火?** | PSRAM(OCT / 80MHz / `SPIRAM_USE_MALLOC`)= P10-4 と同一 | **否定**(P10-4 を完全再現、ハングは SD で確定) |
+| E3 | **H5 PSRAM 由来バッファが DMA 経路へ**(H2 の一種) | 上記 + `CONFIG_SPIRAM_USE_CAPS_ALLOC` | **否定**(同一の失敗) |
+| E5 | **SDMMC プローブ自体が原因** | PSRAM(同上)+ **SDMMC プローブをスキップ** | **成立**(正常起動) |
+| E6 | go 基準 1: 連続再起動 | E5 構成で 20 回 | **20/20 成功** |
+| E7 | go 基準 2: 既存アプリの回帰 | E5 構成で `device-regress.sh` + INTERNAL heap 実測 | **劣化なし**(下記) |
+| E8 | PSRAM レイテンシ(P10-4 で未取得) | E5 構成 + 16B ランダム読み書きベンチ | **取得**(下記) |
+| — | go 基準 3: `midi_loopback` E1 のタイミング影響 | ループバック配線 + アプリ内タップが必要 | **別フェーズへ繰り越し**(ユーザー判断) |
+
+H3(`SPIRAM_MODE` / `SPIRAM_SPEED` の組み合わせ)は、E5 が **80MHz / OCT のまま成功した**
+ことで検証不要になった(速度・モードの問題ではない)。
+
+### E1: ピン競合 — 否定
+
+本ボードが使う GPIO(`board_pins.hpp` + `audio.cpp`):
+
+`0, 1, 2, 3, 4, 5, 14, 15, 16, 17, 18, 21, 38, 39, 40, 41, 42, 45, 47, 48`
+
+ESP32-S3 の octal PSRAM が占有するのは **GPIO 33〜37**(SPIIO4〜7 + SPIDQS)で、
+**1 本も重ならない**。SD は SDMMC/SPI とも 14/16/17/21。
+(指示書は「GPIO35〜37」としていたが正しくは 33〜37。いずれにせよ競合なし。)
+
+### E2: P10-4 の完全再現とハング箇所の特定
+
+PSRAM 側は**完全に正常**:
+
+```
+octal_psram: vendor id 0x0d (AP), density 64 Mbit, 3V, Readlatency 10 cycles
+esp_psram: Found 8MB PSRAM device / Speed: 80MHz
+esp_psram: SPI SRAM memory test OK
+esp_psram: Adding pool of 8192K of PSRAM memory to heap allocator
+APP: Audio_Init: free heap 8506159 -> 8458955
+```
+
+そのうえで **毎回** `SDCARD: Trying SDMMC host: CLK=14 CMD=17 D0=16` の直後で停止し、
+**パニックのバックトレースを一切出さずに** `rst:0x8 (TG1WDT_SYS_RST)` でリブートする
+(4 回のブートすべて同一)。バックトレースが出ないことから、割り込み禁止区間または
+クリティカルセクション内で回り続けていると読める。**H4 は否定**(SD 以外の初期化ではない)。
+
+### E3: メモリ配置は原因ではない
+
+`CONFIG_SPIRAM_USE_CAPS_ALLOC`(`malloc()` が PSRAM を返さず、PSRAM は
+`heap_caps_malloc(MALLOC_CAP_SPIRAM)` でしか取れない)にしても、**9 回のブートすべてで
+同一の失敗**。「DMA 不可の PSRAM バッファが SD ドライバに渡って固まる」という筋は消えた。
+
+### E5: 原因の特定 — **SDMMC プローブ**
+
+`sdcard.cpp` の SDMMC プローブ(`#ifdef PIN_SDMMC_CLK` のブロック)を飛ばして
+SDSPI に直行させたところ、**PSRAM を有効にしたまま正常起動した**:
+
+```
+SDCARD: Using SPI host=2 MOSI=17 MISO=16 SCLK=14 CS=21
+Name: USD00 / Size: 30250MB
+MBCMD: ready
+WASM/LAUNCH: menu: 8 app(s) listed
+```
+
+このプローブは **本ボードでは一度も成功したことがなく、失敗して SDSPI へ
+フォールバックするためだけに存在する**(P10-4 の記述どおり)。PSRAM を有効にすると、
+このプローブが「失敗して戻る」代わりに**戻ってこなくなる**のが真因である。
+
+> **P10-4 はこの一歩手前まで来ていた。** 当時のパッチ
+> (`captures/phase10/p10_4_test_code.patch`)には `PHASE10_MEMAUDIT_SKIP_SDMMC` という
+> スキップ用マクロが**コメントアウトのまま**入っており、有効化して試す前に撤退していた。
+
+**解消に必要な変更の規模**: プローブを飛ばすこと自体は 1 行だが、**それだけでは足りない**。
+最終回帰で判明したとおり(下記「SD の初期化経路が largest free block を決めている」)、
+SDMMC プローブを飛ばすと常に SDSPI 経路になり、no-PSRAM ではその構成で
+最大連続ブロックが 15,360 まで落ちて WASM が起動できなくなる。**PSRAM の本番反映は
+「SDMMC プローブの扱い」と「SDSPI 経路のメモリ消費対策」をセットで扱う必要がある。**
+
+### E6: 連続再起動 20 回 — **20/20 成功**
+
+E5 構成で、モニタ起動によるリセットを 20 回繰り返し、毎回
+「PSRAM 8MB 認識 → SD マウント(30250MB)→ ランチャー表示」に到達し、
+**TG1WDT リセットは 0 件**。go 基準 1 を満たす。
+
+### E7: 既存アプリの回帰 — 劣化なし。ただし **largest free block は増えない**
+
+PSRAM を有効にすると `esp_get_free_heap_size()` と `MALLOC_CAP_DEFAULT` が PSRAM を
+含んでしまい `app: stopped` の値が比較にならない(free 8.4MB / largest 8.2MB と出る)。
+そこで**シリアルコマンド `heap`(`MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT`)で測り直した**。
+
+| 構成 | ランチャー待機時の INTERNAL free | INTERNAL largest free block |
+|---|---|---|
+| PSRAM 無効(main) | **64,276** | **31,744** |
+| PSRAM 有効(E5 構成) | **106,763**(アプリ実行後も 106,599 で安定) | **31,744** |
+
+- 内部 RAM の空きは **+42,487 B** 増える(LVGL バッファ等が PSRAM へ移るため)。
+- **しかし largest free block は 31,744 で完全に同一**。WARN/ERROR 0 件、
+  アプリごとの free heap 差分も 0。
+- 全アプリの `device-regress.sh` 実行でも WARN/ERROR 0 件。
+
+**これは本フェーズの動機に対する重要な否定的結果である。** 31,744 は独立した
+32KB の DRAM 領域が与える構造的な上限で、内部 RAM がいくら空いても伸びない。
+WASM の linear memory 確保が見ているのはまさにこの最大連続ブロックなので、
+**PSRAM を有効にするだけでは linear memory の逼迫は 1 バイトも緩和されない。**
+緩和するには **WAMR プール / linear memory を明示的に PSRAM へ置く**必要がある
+(= 別フェーズの本番反映作業そのもの)。
+
+### E8: PSRAM の 16B ランダムアクセス実測(P10-4 で未取得だった値)
+
+L0 キュー操作を模した read 16B → write 16B を 8192 回。`-Og` ビルドなので
+絶対値は悲観的、比率で読むこと(P10-4 と同じ条件)。
+
+| 配置 | ns/op(4 回) | internal 比 |
+|---|---|---|
+| internal 2KB(BSS) | 362.4 / 364.4 / 413.6 / 362.7 | 1.00 |
+| **PSRAM 4KB**(キャッシュ内) | 375.9 / 373.5 / 375.4 / 375.0 | **1.03** |
+| **PSRAM 256KB**(キャッシュ超え) | 879.0 / 965.9 / 874.9 / 872.4 | **2.4〜2.7** |
+
+- キャッシュに収まる範囲なら PSRAM は internal と実質同等(+3%)。
+- キャッシュを超えると約 2.5 倍。ただしこれは **P10-4 が internal で観測した
+  負荷時の最悪値 1385 ns/op より速い**。
+- 設計根拠表(`docs/architecture.md` §12)への追記に使える。
+
+### go / no-go 判定 — **条件付き go**
+
+| go 基準 | 結果 |
+|---|---|
+| PSRAM + SD + アプリ起動が 20 回連続で成功 | **満たす**(E6: 20/20) |
+| 既存アプリの回帰に劣化がない | **満たす**(E7: WARN/ERROR 0、差分 0、largest 不変) |
+| largest free block が増えるはず | **増えなかった**(31,744 のまま。理由は上記) |
+| `midi_loopback` E1 のタイミング影響 | **未実施**(別フェーズへ繰り越し。ユーザー判断) |
+| PSRAM レイテンシの実測値 | **取得**(E8) |
+
+**判定: 条件付き go。** PSRAM は本ボードで問題なく使える(真因は SDMMC プローブで、
+修正は 1 行)。ただし **PSRAM を有効にするだけでは本フェーズの動機(WASM linear
+memory の逼迫緩和)は達成されない**ので、本番反映は「WAMR プール / linear memory を
+PSRAM へ移す」ところまでを一体で行う別フェーズとする。その別フェーズの完了条件に
+**`midi_loopback` E1 によるタイミング検証**(本フェーズで繰り越した項目)を含めること。
+
+### 後片付け
+
+- 検証専用コード(`PHASE12_SERIAL_PROBE` / `PHASE12_NO_SDMMC_PROBE` / `PHASE12_PSRAM_TEST`)
+  と `sdkconfig.defaults` の PSRAM 設定はすべて削除済み。`git grep PHASE12 -- src scripts` で残存なし。
+- main は **no-PSRAM 構成**に戻し、リビルド・フラッシュ・自動回帰で確認済み。
+
+---
+
+## 最終回帰と、その過程で判明した重大な事実(2026-09-06)
+
+### SD の初期化経路が largest free block を決めている
+
+作業 4 の後始末(main を no-PSRAM に戻す)を終えて最終回帰を回したところ、**全アプリが
+`instantiate: WASM module instantiate failed: allocate linear memory failed` で起動失敗**
+した。ファームウェアは無関係で、起動直後のヒープは合格時と 1 バイト単位で同一だった
+(`Audio_Init: 147596 -> 100392`、`heap after seq init: free 94212, largest block 53248`)。
+
+分岐していたのは **SD がどの経路でマウントされたか**である:
+
+| ログ | SD 経路 | ネゴ速度 | アプリ実行時 largest block | 結果 |
+|---|---|---|---|---|
+| `monitor-work1` / `monitor-regress` / `phase12-auto` | **SDMMC** | 20.00 MHz | **31,744** | 全アプリ OK |
+| `phase12-nopsram-internal` / `phase12-final`(1 回目) | **SDSPI**(フォールバック) | 11.43 MHz | **15,360** | **全アプリ NG** |
+
+SDSPI 経路に落ちると **最大連続ブロックがちょうど 16,384 B 減って 15,360** になり、
+WASM の linear memory(約 20KB 連続)が確保できなくなる。教訓 9c の「largest free block
+約 15KB で破綻」と同一水準である。
+
+```
+E (1361) sdmmc_common: sdmmc_init_ocr: send_op_cond (1) returned 0x107
+E (1361) vfs_fat_sdmmc: sdmmc_card_init failed (0x107).
+W (1361) SDCARD: SDMMC mount failed: 263, falling back to SDSPI
+```
+
+### P10-4 の記述を訂正する
+
+`docs/results/phase10.md` P10-4 の
+
+> PSRAM 無効時はこのプローブが失敗して SDSPI へフォールバックしており、
+> 実際に使われるのは SPI 経路のみである
+
+は**現状と合っていない**。本フェーズの合格ログはすべて **SDMMC 20MHz でマウントに成功**
+している。つまりこの機体は普段 SDMMC で動いており、**SDSPI は「落ちると WASM アプリが
+動かなくなる」経路**である。作業 4 の E5 で「1 行で直る」と書いた見立ては、この事実に
+照らして**撤回**した(上記 E5 の節に反映済み)。
+
+### 復旧方法: ボードの電源を入れ直す(ソフトリセットでは駄目)
+
+SDMMC 初期化が失敗し始めたのは、作業 4 の PSRAM 実験で **SD プローブ中のリブートループを
+何十回も起こした直後**からである。`idf.py monitor` の再起動は RTS/DTR によるソフトリセットで
+**SD カードの電源は落ちない**ため、カードが応答しない状態から復帰しない。
+
+**USB を抜き差しして電源を入れ直したところ、SDMMC 20MHz マウントに復帰し、回帰も一発で
+合格した。** ソフトリセットを何度繰り返しても直らなかったので、この区別は重要である。
+
+### 最終自動回帰 — **PASS**(生データ: `captures/phase12-final/`)
+
+main(no-PSRAM、作業 1〜3 の成果物)に対し `./scripts/device-regress.sh --task phase12-final`
+を 1 回実行。**物理操作なしで完走。**
+
+| アプリ | 開始 free heap | 終了 free heap | 差分 | largest block | 判定 |
+|---|---|---|---|---|---|
+| touch_demo | 49160 | 49160 | +0 | 31744 | PASS |
+| mp3player | 49160 | 49160 | +0 | 31744 | PASS |
+| clicktest | 49160 | 49160 | +0 | 31744 | PASS |
+| metronome | 49160 | 49160 | +0 | 31744 | PASS |
+| midi_loopback | 49160 | 49160 | +0 | 31744 | PASS |
+| seq_smoke | 49160 | 49160 | +0 | 31744 | PASS |
+
+許容外の WARN/ERROR: **0 件**。
+
+## Phase 13 への申し送り
+
+1. **回帰は `./scripts/device-regress.sh --task <名前>` を既定にする**(`docs/workflow.md`
+   §2.2 / §3.4)。物理操作なしで約 100 秒。対象アプリ・許容値は
+   `scripts/device-regress.conf`。音・画面・アプリ内 UI 操作の確認が要るときだけ §3.3 の
+   人間操作+カメラを使う(mp3player の再生経路 = 既知の −44B もそちら側)。
+2. **メモリ基準値**(シリアルコンソール込み、no-PSRAM):
+   `Audio_Init 147596 -> 100392` / `runtime ready 93968` / アプリ実行時
+   **free heap 49160、largest free block 31744**。INTERNAL free はランチャー待機時 64,276。
+3. **フラッシュ残容量は 3.15MB(75%)**。当面気にしなくてよい。
+4. **`allocate linear memory failed` が出たらまず SD の経路を疑うこと。**
+   `Speed: 20.00 MHz` = SDMMC(正常、largest 31744)、`11.43 MHz` + `falling back to
+   SDSPI` = 異常(largest 15360、WASM 起動不能)。**復旧は USB の抜き差しによる電源断**で、
+   ソフトリセットでは直らない。
+5. **PSRAM は条件付き go**。真因は SDMMC プローブだが、プローブを外すと SDSPI 固定になり
+   上記 4 の破綻を招くため、本番反映は「SDMMC プローブの扱い + SDSPI 経路のメモリ消費対策 +
+   WAMR プール / linear memory の PSRAM 移動」を一体で行う別フェーズとする。
+   その完了条件に **`midi_loopback` E1 によるタイミング検証**(本フェーズで繰り越し)を含める。
+   **PSRAM を有効にするだけでは largest free block は 31,744 のまま増えない**ことに注意。
