@@ -341,26 +341,36 @@ def analyze(rows, bpm, t_from, t_to, label, segments, span_no=None):
 
 
 def analyze_txlog(path, label):
-    """条件 D: PHASE13_TXLOG_TEST が出す送信側の打刻ログから σ を出す。
-    形式は `PHASE13 TX <us>`(1 行 1 クロック)を想定する。"""
-    ts = []
+    """条件 D: 検証ビルド(PHASE13_TXLOG_TEST)が出す送信側の集計行を読む。
+
+    行の形式(10 秒窓ごと):
+      PHASE13 TXWIN n=<件数> sd=<µs> mean=<µs> min=<µs> max=<µs> out=<件数>
+    偏差は理想グリッド(120bpm = 20833.333µs)からのずれで、P10-3 の
+    「TX 発火偏差」と同じ量である。
+    """
     import re as _re
-    pat = _re.compile(r"PHASE13\s+TX\s+(\d+)")
+    pat = _re.compile(r"PHASE13 TXWIN n=(\d+) sd=(-?\d+) mean=(-?\d+) "
+                      r"min=(-?\d+) max=(-?\d+) out=(\d+)")
+    wins = []
     with open(path, errors="replace") as f:
         for line in f:
             m = pat.search(line)
             if m:
-                ts.append(int(m.group(1)))
-    if len(ts) < 2:
-        return f"### {label}\n\nPHASE13 TX の行が見つからない({path})\n"
-    iv = [ts[i] - ts[i - 1] for i in range(1, len(ts))]
-    st = stats(iv)
-    dev = [abs(v - st['mean']) for v in iv]
-    out = [f"### {label}(送信側打刻)\n", "| 項目 | 値 |", "|---|---|",
-           f"| クロック数 | {len(ts)} |",
-           f"| 間隔 min / mean / max | {st['min']} / {st['mean']:.1f} / {st['max']} µs |",
-           f"| **送信側 σ** | **{st['sd']:.1f} µs** |",
-           f"| 平均からの最大偏差 | {max(dev):.0f} µs |", ""]
+                wins.append(tuple(int(x) for x in m.groups()))
+    if not wins:
+        return f"### {label}\n\n(PHASE13 TXWIN の行が見つからない: {path})\n"
+    out = [f"### {label}(送信側打刻 / 10 秒窓)\n",
+           "| 窓 | クロック数 | σ (µs) | 平均偏差 (µs) | min (µs) | max (µs) | |偏差|>1ms |",
+           "|---|---|---|---|---|---|---|"]
+    for i, (n, sd, mean, mn, mx, o) in enumerate(wins):
+        out.append(f"| {i} | {n} | **{sd}** | {mean} | {mn} | {mx} | {o} |")
+    sds = [w[1] for w in wins]
+    tot = sum(w[0] for w in wins)
+    out.append("")
+    out.append(f"- 窓数 {len(wins)} / クロック総数 {tot}")
+    out.append(f"- **σ: 最小 {min(sds)} µs / 中央 {sorted(sds)[len(sds)//2]} µs / 最大 {max(sds)} µs**")
+    out.append(f"- |偏差| > 1ms の合計: {sum(w[5] for w in wins)} 件")
+    out.append("")
     return "\n".join(out)
 
 

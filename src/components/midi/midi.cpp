@@ -1,6 +1,8 @@
 // MIDI OUT native 実装(実機側)。Phase 8b。詳細は midi.hpp / shared/hostapi_defs.h 参照。
 #include "midi.hpp"
 
+#include <math.h>
+
 #include "board_pins.hpp"
 #include "driver/uart.h"
 #include "esp_log.h"
@@ -212,10 +214,73 @@ int32_t Midi_Send(const uint8_t* bytes, size_t len)
     return 0;
 }
 
+#ifdef PHASE13_TXLOG_TEST
+// Phase 13 条件 D(検証専用): 送信側の打刻。uart_write_bytes 直前に打った時刻を
+// 理想グリッド(120bpm = 500000/24 µs)と比べ、偏差の統計を 10 秒窓ごとに出す。
+// 1 発ごとにログを出すと計測対象そのものを乱すので、窓の集計だけを出す
+// (9c の TXLOG が大きな検証専用バッファでヒープを圧迫した教訓も踏まえ、
+//  バッファは持たずインクリメンタルに集計する)。
+namespace {
+constexpr int64_t kP13GridUs6 = 500000 * 1000000LL / 24; // 20833.333...µs を 1e-6 µs 単位で
+int64_t  s_p13_t0;
+uint32_t s_p13_i;
+uint32_t s_p13_n;
+int64_t  s_p13_sum;
+int64_t  s_p13_sumsq;
+int32_t  s_p13_min;
+int32_t  s_p13_max;
+uint32_t s_p13_out;
+int64_t  s_p13_wstart;
+
+void phase13_tx_clock(int64_t now)
+{
+    if (s_p13_t0 == 0) {
+        s_p13_t0 = now;
+        s_p13_wstart = now;
+        s_p13_i = 0;
+        s_p13_min = INT32_MAX;
+        s_p13_max = INT32_MIN;
+    }
+    const int64_t expected = s_p13_t0 + (int64_t)s_p13_i * kP13GridUs6 / 1000000LL;
+    const int32_t dev = (int32_t)(now - expected);
+    s_p13_i++;
+    s_p13_n++;
+    s_p13_sum += dev;
+    s_p13_sumsq += (int64_t)dev * dev;
+    if (dev < s_p13_min) s_p13_min = dev;
+    if (dev > s_p13_max) s_p13_max = dev;
+    if (dev > 1000 || dev < -1000) s_p13_out++;
+
+    if (now - s_p13_wstart >= 10000000) { // 10 秒窓
+        const int64_t mean = s_p13_sum / (int64_t)s_p13_n;
+        const int64_t var = s_p13_sumsq / (int64_t)s_p13_n - mean * mean;
+        const int32_t sd = (int32_t)sqrtf((float)(var < 0 ? 0 : var));
+        ESP_LOGI(TAG, "PHASE13 TXWIN n=%u sd=%d mean=%d min=%d max=%d out=%u",
+                 (unsigned)s_p13_n, (int)sd, (int)mean, (int)s_p13_min, (int)s_p13_max,
+                 (unsigned)s_p13_out);
+        s_p13_wstart = now;
+        s_p13_n = 0;
+        s_p13_sum = 0;
+        s_p13_sumsq = 0;
+        s_p13_min = INT32_MAX;
+        s_p13_max = INT32_MIN;
+        s_p13_out = 0;
+    }
+}
+} // namespace
+#endif
+
 void Midi_TxBytes(const uint8_t* bytes, size_t len)
 {
     if (!s_uart_ready || bytes == nullptr || len == 0 || len > kMaxMsgLen) return;
+#ifdef PHASE13_TXLOG_TEST
+    const bool p13_clock = (len == 1 && bytes[0] == 0xF8);
+    const int64_t p13_now = p13_clock ? esp_timer_get_time() : 0;
+#endif
     uart_write_bytes(kMidiUart, reinterpret_cast<const char*>(bytes), len);
+#ifdef PHASE13_TXLOG_TEST
+    if (p13_clock) phase13_tx_clock(p13_now); // 集計は書き込みの後で
+#endif
 }
 
 void Midi_NotifyBeatScheduled(uint32_t target_ms)
