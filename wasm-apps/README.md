@@ -28,6 +28,6 @@ cp target/wasm32-unknown-unknown/release/<app>.wasm ./<app>.wasm
 | `touch_demo/` | Phase 6A 検証。`hostapi_poll_event` のタッチイベントを座標・DOWN/UP カウントで可視化、ボタンタップでクリック音 |
 | `mp3player/` | Phase 6B〜。`hostapi_audio_*` で MP3 を制御(PLAY/PAUSE/STOP/VOL±、FINISHED 検知)。6C でファイル列挙+プレイリスト対応 |
 | `clicktest/` | Phase 7A 検証。`hostapi_click_schedule` で BPM120 を予約発音。タップで SCHED⇔LEGACY(tick 内直呼び)を切替してジッタ比較 |
-| `metronome/` | Phase 7B/7C/7D。メトロノーム本体。可変 BPM(40-240、±5/±1・長押し連打加速)・拍子(2/3/4/6)・START/STOP・拍ランプ・音量調整(V-/V+)。小節頭は `hostapi_tone_*` で定義したアクセント音(1568Hz)、発音は tone_schedule への毎 tick 再予約 |
+| `metronome/` | Phase 7B/7C/7D → **Phase 13 で音楽時間軸 API に全面書き直し**。メトロノーム本体。可変 BPM(40-240、±5/±1・長押し連打加速)・拍子(2/3/4/6)・START/STOP・拍ランプ・音量調整(V-/V+)。クリックは `seq_write`(port=CLICK / OP_TONE)で playback tick に予約し、MIDI Clock は L1 がグリッドから生成する(アプリは `hostapi_midi_send` を呼ばない)。小節頭は 1568Hz のアクセント音 |
 | `midi_loopback/` | Phase 9b。MIDI ループバック診断アプリ。`hostapi_midi_send` の Start/Stop(BPM120固定)で自機 MIDI OUT の 24ppqn クロックを駆動し、`hostapi_midi_recv` で自機 MIDI IN の受信を診断表示(Stage1: 受信生バイトの16進表示・累積バイト数、Stage2: 実測 BPM、Stage3: クロック間隔の min/max/σ・公称値との偏差・受信数 vs 期待数) |
 | `seq_smoke/` | Phase 11。新 Host API 12 関数(transport / tempomap / seq / time_us_to_tick)の恒久スモークテスト。タップ不要で一巡し、8 項目の合否をビットで画面表示 + CC#119/#120 で外部出力する。実機と Linux ホストで同一 `.wasm` を走らせて比較できる |
