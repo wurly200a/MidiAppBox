@@ -22,10 +22,6 @@
 static const char* TAG = "WASM/LAUNCH";
 
 // 初回セットアップ用の埋め込みサンプルアプリ
-extern const uint8_t demo_wasm_start[] asm("_binary_demo_wasm_start");
-extern const uint8_t demo_wasm_end[]   asm("_binary_demo_wasm_end");
-extern const uint8_t bars_wasm_start[] asm("_binary_bars_wasm_start");
-extern const uint8_t bars_wasm_end[]   asm("_binary_bars_wasm_end");
 extern const uint8_t touch_demo_wasm_start[] asm("_binary_touch_demo_wasm_start");
 extern const uint8_t touch_demo_wasm_end[]   asm("_binary_touch_demo_wasm_end");
 extern const uint8_t mp3player_wasm_start[] asm("_binary_mp3player_wasm_start");
@@ -213,10 +209,6 @@ bool launcher_prepare_sd(char* status, size_t status_len)
 
     // 初回セットアップ: サンプルアプリを配置
     char path[64];
-    snprintf(path, sizeof(path), "%s/demo.wasm", kAppsDir);
-    seed_file(path, demo_wasm_start, demo_wasm_end);
-    snprintf(path, sizeof(path), "%s/bars.wasm", kAppsDir);
-    seed_file(path, bars_wasm_start, bars_wasm_end);
     snprintf(path, sizeof(path), "%s/touch_demo.wasm", kAppsDir);
     seed_file(path, touch_demo_wasm_start, touch_demo_wasm_end);
     snprintf(path, sizeof(path), "%s/mp3player.wasm", kAppsDir);
@@ -227,7 +219,7 @@ bool launcher_prepare_sd(char* status, size_t status_len)
     seed_file(path, metronome_wasm_start, metronome_wasm_end);
     snprintf(path, sizeof(path), "%s/midi_loopback.wasm", kAppsDir);
     seed_file(path, midi_loopback_wasm_start, midi_loopback_wasm_end);
-    // Phase 11 ステップ 2 の検証用(フェーズ末に扱いを決める)
+    // 新 API 12 関数の恒久スモーク(Phase 11)
     snprintf(path, sizeof(path), "%s/seq_smoke.wasm", kAppsDir);
     seed_file(path, seq_smoke_wasm_start, seq_smoke_wasm_end);
 

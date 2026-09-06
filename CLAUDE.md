@@ -39,6 +39,8 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
   各ステップの結果はログとして **docs/results/ の該当ファイル**に残すこと。
   実施記録の冒頭には対応するフェーズ指示書(docs/prompts/phaseXX.md)への参照を書く。
 - 依存追加は最小限に留める。
-- 既存アプリ(demo / bars / mp3player / metronome / clicktest)の回帰を壊さない。
+- 既存アプリ(touch_demo / mp3player / clicktest / metronome / midi_loopback / seq_smoke)の
+  回帰を壊さない。回帰対象は Phase 12 作業 2 でこの 6 本に絞った(判断根拠は
+  docs/results/phase12.md のカバレッジ表)。
   (旧「MP3 デモモードで分岐」ルールは Phase 6D で解消済み。履歴は
   docs/results/phase00.md・phase06.md。)

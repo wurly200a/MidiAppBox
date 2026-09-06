@@ -2,22 +2,10 @@
 
 namespace wasmrt {
 
-// ---- Phase 1/4 の単体テスト・計測(スタンドアロン、runtime_init とは併用しない) ----
-
-// フラッシュ埋め込みの hello.wasm をロードして app_init() を呼び、
-// 結果と前後の空きヒープをログに出す。成功で true。
-bool run_selftest();
-
-// selftest を専用タスク(十分なネイティブスタック)で実行して完了を待つ。
-bool run_selftest_task();
-
 // ---- Phase 5: ランタイム常駐+アプリライフサイクル(ホスト所有) ----
 
 // 起動時に一度: WAMR full_init + ホスト API 登録。以後 destroy しない。
 bool runtime_init();
-
-// 計測用 bench.wasm(埋め込み)を実行して結果をログする。runtime_init 後に呼ぶ。
-void run_bench();
 
 // アプリ停止時コールバック。error は正常停止なら nullptr、異常なら静的文字列。
 // アプリ実行スレッドから呼ばれる(LVGL を触るなら lv_async_call 経由にすること)。

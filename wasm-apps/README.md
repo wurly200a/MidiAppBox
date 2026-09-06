@@ -11,7 +11,7 @@ MidiAppBox 上で動かす WASM アプリ(Rust, `wasm32-unknown-unknown`, no_std
 rustup target add wasm32-unknown-unknown
 ```
 
-## ビルド手順(hello / demo 共通)
+## ビルド手順(全アプリ共通)
 
 ```
 cd wasm-apps/<app>
@@ -25,12 +25,9 @@ cp target/wasm32-unknown-unknown/release/<app>.wasm ./<app>.wasm
 
 | アプリ | 内容 |
 |---|---|
-| `hello/` | Phase 1 の最小テスト。`app_init()` が 42 を返すだけ |
-| `demo/` | Phase 2 デモ。ホスト API で 1 秒ごとにカウンタ描画+クリック音 |
-| `bars/` | Phase 5B デモ。イコライザ風 8 本バー(座標固定・サイズ/色可変) |
-| `bench/` | Phase 4 計測用。`bench_empty`/`bench_hostcall`(ランチャーからは起動不可) |
 | `touch_demo/` | Phase 6A 検証。`hostapi_poll_event` のタッチイベントを座標・DOWN/UP カウントで可視化、ボタンタップでクリック音 |
 | `mp3player/` | Phase 6B〜。`hostapi_audio_*` で MP3 を制御(PLAY/PAUSE/STOP/VOL±、FINISHED 検知)。6C でファイル列挙+プレイリスト対応 |
 | `clicktest/` | Phase 7A 検証。`hostapi_click_schedule` で BPM120 を予約発音。タップで SCHED⇔LEGACY(tick 内直呼び)を切替してジッタ比較 |
 | `metronome/` | Phase 7B/7C/7D。メトロノーム本体。可変 BPM(40-240、±5/±1・長押し連打加速)・拍子(2/3/4/6)・START/STOP・拍ランプ・音量調整(V-/V+)。小節頭は `hostapi_tone_*` で定義したアクセント音(1568Hz)、発音は tone_schedule への毎 tick 再予約 |
 | `midi_loopback/` | Phase 9b。MIDI ループバック診断アプリ。`hostapi_midi_send` の Start/Stop(BPM120固定)で自機 MIDI OUT の 24ppqn クロックを駆動し、`hostapi_midi_recv` で自機 MIDI IN の受信を診断表示(Stage1: 受信生バイトの16進表示・累積バイト数、Stage2: 実測 BPM、Stage3: クロック間隔の min/max/σ・公称値との偏差・受信数 vs 期待数) |
+| `seq_smoke/` | Phase 11。新 Host API 12 関数(transport / tempomap / seq / time_us_to_tick)の恒久スモークテスト。タップ不要で一巡し、8 項目の合否をビットで画面表示 + CC#119/#120 で外部出力する。実機と Linux ホストで同一 `.wasm` を走らせて比較できる |

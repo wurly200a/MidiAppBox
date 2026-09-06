@@ -7,7 +7,6 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "esp_pthread.h"
-#include "esp_cpu.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -19,12 +18,6 @@
 
 static const char* TAG = "WASM";
 
-// EMBED_FILES で埋め込んだ .wasm(hello/bench はテスト・計測用に残す)
-extern const uint8_t hello_wasm_start[] asm("_binary_hello_wasm_start");
-extern const uint8_t hello_wasm_end[]   asm("_binary_hello_wasm_end");
-extern const uint8_t bench_wasm_start[] asm("_binary_bench_wasm_start");
-extern const uint8_t bench_wasm_end[]   asm("_binary_bench_wasm_end");
-
 // WAMR グローバルヒーププール(内部 SRAM, BSS)。
 // Phase 4 実測でデモ規模の消費は ~27KB。Phase 7B でクリックタスク等の静的確保が
 // 増えた際、system heap の最大連続ブロックが 15KB まで細り linear memory
@@ -35,196 +28,11 @@ static uint8_t s_wamr_heap[48 * 1024];
 
 namespace wasmrt {
 
-bool run_selftest()
-{
-    const size_t heap_before = esp_get_free_heap_size();
-    const size_t internal_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGI(TAG, "free heap before init: %u (internal %u)",
-             (unsigned)heap_before, (unsigned)internal_before);
-
-    const int64_t t0 = esp_timer_get_time();
-
-    RuntimeInitArgs init_args;
-    memset(&init_args, 0, sizeof(init_args));
-    init_args.mem_alloc_type = Alloc_With_Pool;
-    init_args.mem_alloc_option.pool.heap_buf = s_wamr_heap;
-    init_args.mem_alloc_option.pool.heap_size = sizeof(s_wamr_heap);
-
-    if (!wasm_runtime_full_init(&init_args)) {
-        ESP_LOGE(TAG, "wasm_runtime_full_init failed");
-        return false;
-    }
-
-    bool ok = false;
-    wasm_module_t module = nullptr;
-    wasm_module_inst_t inst = nullptr;
-    wasm_exec_env_t exec_env = nullptr;
-    uint8_t* wasm_buf = nullptr;
-    char error_buf[128];
-
-    const uint32_t wasm_size = (uint32_t)(hello_wasm_end - hello_wasm_start);
-    ESP_LOGI(TAG, "loading hello.wasm (%u bytes)", (unsigned)wasm_size);
-
-    do {
-        // interpreter モードの WAMR は load 後もバッファを参照し続け、
-        // fast-interp はバッファを書き換えるため、可変コピーを unload まで保持する
-        wasm_buf = (uint8_t*)malloc(wasm_size);
-        if (!wasm_buf) {
-            ESP_LOGE(TAG, "malloc for wasm buf failed");
-            break;
-        }
-        memcpy(wasm_buf, hello_wasm_start, wasm_size);
-
-        module = wasm_runtime_load(wasm_buf, wasm_size, error_buf, sizeof(error_buf));
-        if (!module) {
-            ESP_LOGE(TAG, "load failed: %s", error_buf);
-            break;
-        }
-
-        inst = wasm_runtime_instantiate(module, 8 * 1024 /*stack*/, 8 * 1024 /*heap*/,
-                                        error_buf, sizeof(error_buf));
-        if (!inst) {
-            ESP_LOGE(TAG, "instantiate failed: %s", error_buf);
-            break;
-        }
-
-        exec_env = wasm_runtime_create_exec_env(inst, 8 * 1024);
-        if (!exec_env) {
-            ESP_LOGE(TAG, "create_exec_env failed");
-            break;
-        }
-
-        const int32_t export_count = wasm_runtime_get_export_count(module);
-        for (int32_t i = 0; i < export_count; i++) {
-            wasm_export_t ex;
-            wasm_runtime_get_export_type(module, i, &ex);
-            ESP_LOGI(TAG, "export[%d]: kind=%d name='%s'", (int)i, (int)ex.kind, ex.name);
-        }
-
-        wasm_function_inst_t fn = wasm_runtime_lookup_function(inst, "app_init");
-        if (!fn) {
-            ESP_LOGE(TAG, "app_init not found in module");
-            break;
-        }
-
-        uint32_t argv[1] = {0};
-        if (!wasm_runtime_call_wasm(exec_env, fn, 0, argv)) {
-            ESP_LOGE(TAG, "call failed: %s", wasm_runtime_get_exception(inst));
-            break;
-        }
-
-        const int64_t t1 = esp_timer_get_time();
-        ESP_LOGI(TAG, "app_init() returned %d (init+load+call took %lld us)",
-                 (int)argv[0], (long long)(t1 - t0));
-        ok = ((int)argv[0] == 42);
-    } while (false);
-
-    const size_t heap_loaded = esp_get_free_heap_size();
-    ESP_LOGI(TAG, "free heap with module loaded: %u (delta %d)",
-             (unsigned)heap_loaded, (int)(heap_before - heap_loaded));
-
-    if (exec_env) wasm_runtime_destroy_exec_env(exec_env);
-    if (inst) wasm_runtime_deinstantiate(inst);
-    if (module) wasm_runtime_unload(module);
-    if (wasm_buf) free(wasm_buf);
-    wasm_runtime_destroy();
-
-    ESP_LOGI(TAG, "free heap after destroy: %u (WAMR pool is static: %u bytes)",
-             (unsigned)esp_get_free_heap_size(), (unsigned)sizeof(s_wamr_heap));
-    ESP_LOGI(TAG, "selftest %s", ok ? "PASS" : "FAIL");
-    return ok;
-}
-
-// ---- Phase 4: 計測 ----
+// ---- tick ジッタ計測(常設。Phase 4 §2 由来)----
 
 namespace {
 
-// ホスト API 呼び出しコスト計測(Phase 4 §1)。
-// ランタイム初期化・natives 登録済みの状態で demo_thread から呼ぶ。
-void run_bench_module()
-{
-    char error_buf[128];
-    const uint32_t wasm_size = (uint32_t)(bench_wasm_end - bench_wasm_start);
-    uint8_t* wasm_buf = (uint8_t*)malloc(wasm_size);
-    if (!wasm_buf) return;
-    memcpy(wasm_buf, bench_wasm_start, wasm_size);
-
-    wasm_module_t module =
-        wasm_runtime_load(wasm_buf, wasm_size, error_buf, sizeof(error_buf));
-    if (!module) {
-        ESP_LOGE(TAG, "bench: load failed: %s", error_buf);
-        free(wasm_buf);
-        return;
-    }
-    wasm_module_inst_t inst = wasm_runtime_instantiate(
-        module, 8 * 1024, 8 * 1024, error_buf, sizeof(error_buf));
-    wasm_exec_env_t exec_env =
-        inst ? wasm_runtime_create_exec_env(inst, 8 * 1024) : nullptr;
-    wasm_function_inst_t fn_empty =
-        inst ? wasm_runtime_lookup_function(inst, "bench_empty") : nullptr;
-    wasm_function_inst_t fn_host =
-        inst ? wasm_runtime_lookup_function(inst, "bench_hostcall") : nullptr;
-
-    if (exec_env && fn_empty && fn_host) {
-        constexpr uint32_t kLoopN = 100000;
-        constexpr uint32_t kInvokeN = 1000;
-        uint32_t argv[1];
-
-        // (1) host→wasm の関数呼び出しオーバーヘッド: bench_empty(0) を N 回
-        uint32_t c0 = esp_cpu_get_cycle_count();
-        for (uint32_t i = 0; i < kInvokeN; i++) {
-            argv[0] = 0;
-            wasm_runtime_call_wasm(exec_env, fn_empty, 1, argv);
-        }
-        uint32_t c_invoke = esp_cpu_get_cycle_count() - c0;
-
-        // (2) 純 wasm ループ: bench_empty(N)
-        argv[0] = kLoopN;
-        c0 = esp_cpu_get_cycle_count();
-        wasm_runtime_call_wasm(exec_env, fn_empty, 1, argv);
-        uint32_t c_empty = esp_cpu_get_cycle_count() - c0;
-        uint32_t r_empty = argv[0];
-
-        // (3) wasm→host 呼び出し込みループ: bench_hostcall(N)
-        argv[0] = kLoopN;
-        c0 = esp_cpu_get_cycle_count();
-        wasm_runtime_call_wasm(exec_env, fn_host, 1, argv);
-        uint32_t c_host = esp_cpu_get_cycle_count() - c0;
-        uint32_t r_host = argv[0];
-
-        // (4) ネイティブ基準: 同じ処理 (esp_timer 由来の ms 取得) を C で N 回
-        volatile uint32_t sink = 0;
-        c0 = esp_cpu_get_cycle_count();
-        for (uint32_t i = 0; i < kLoopN; i++) {
-            sink += (uint32_t)(esp_timer_get_time() / 1000);
-        }
-        uint32_t c_native = esp_cpu_get_cycle_count() - c0;
-
-        const uint32_t cpu_mhz = 160; // sdkconfig: CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ
-        ESP_LOGI(TAG, "bench: host->wasm invoke: %u cycles/call (%.2f us)",
-                 c_invoke / kInvokeN, (float)(c_invoke / kInvokeN) / cpu_mhz);
-        ESP_LOGI(TAG, "bench: wasm loop body: %.1f cycles/iter",
-                 (float)c_empty / kLoopN);
-        ESP_LOGI(TAG, "bench: wasm->host call (now_ms): %.1f cycles/call (%.2f us)",
-                 (float)(c_host - c_empty) / kLoopN,
-                 (float)(c_host - c_empty) / kLoopN / cpu_mhz);
-        ESP_LOGI(TAG, "bench: native now_ms baseline: %.1f cycles/call (%.2f us)",
-                 (float)c_native / kLoopN, (float)c_native / kLoopN / cpu_mhz);
-        ESP_LOGI(TAG, "bench: (checksums empty=%u host=%u sink=%u)",
-                 r_empty, r_host, (unsigned)sink);
-    } else {
-        ESP_LOGE(TAG, "bench: setup failed (%s)",
-                 inst ? "exports missing" : error_buf);
-    }
-
-    if (exec_env) wasm_runtime_destroy_exec_env(exec_env);
-    if (inst) wasm_runtime_deinstantiate(inst);
-    if (module) wasm_runtime_unload(module);
-    free(wasm_buf);
-}
-
-// tick ジッタ計測(Phase 4 §2)。最初の kJitterSamples 回の
-// 起床間隔と app_tick 実行時間を集めて統計をログする。
+// 最初の kJitterSamples 回の起床間隔と app_tick 実行時間を集めて統計をログする。
 constexpr int kJitterSamples = 1000;
 uint32_t s_intervals_us[kJitterSamples];
 uint32_t s_durations_us[kJitterSamples];
@@ -263,11 +71,6 @@ bool runtime_init()
     ESP_LOGI(TAG, "runtime ready (pool %u bytes), free heap %u",
              (unsigned)sizeof(s_wamr_heap), (unsigned)esp_get_free_heap_size());
     return true;
-}
-
-void run_bench()
-{
-    run_bench_module();
 }
 
 namespace {
@@ -472,29 +275,6 @@ void app_request_stop()
 bool app_is_running()
 {
     return s_app_state.load() != AppState::Idle;
-}
-
-// WAMR の esp-idf プラットフォーム層は pthread_self() を使うため、
-// 実行スレッドは pthread として起こす必要がある(素の xTaskCreate だと
-// ESP-IDF の pthread_self が assert する)。
-bool run_selftest_task()
-{
-    esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
-    cfg.stack_size = 16 * 1024;
-    cfg.thread_name = "wasm_test";
-    esp_pthread_set_cfg(&cfg);
-
-    pthread_t th;
-    auto thread_fn = [](void*) -> void* {
-        return run_selftest() ? (void*)1 : nullptr;
-    };
-    if (pthread_create(&th, nullptr, thread_fn, nullptr) != 0) {
-        ESP_LOGE(TAG, "failed to create wasm_test pthread");
-        return false;
-    }
-    void* ret = nullptr;
-    pthread_join(th, &ret);
-    return ret == (void*)1;
 }
 
 } // namespace wasmrt

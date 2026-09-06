@@ -329,8 +329,10 @@ MIDI クロックはグリッドから直接生成するため**キューを消�
 
 ## 10. 既存アーキからの移行方針(Phase 11 以降の実装順序案)
 
-既存アプリ(demo / bars / mp3player / metronome / clicktest / midi_loopback)の
-回帰を壊さないことを各ステップの完了条件とする。
+既存アプリ(touch_demo / mp3player / clicktest / metronome / midi_loopback /
+seq_smoke)の回帰を壊さないことを各ステップの完了条件とする。回帰対象は
+Phase 12 作業 2 でこの 6 本に絞った(Host API のカバレッジ表は
+docs/results/phase12.md)。
 
 | # | ステップ | 完了条件 |
 |---|---|---|

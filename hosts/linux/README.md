@@ -19,7 +19,7 @@ cmake --build build -j
 ./build/midibox_host <appsディレクトリ>
 
 # 単発実行モード(メニューなし。CI スモーク用)
-./build/midibox_host ../../wasm-apps/demo/demo.wasm
+./build/midibox_host ../../wasm-apps/touch_demo/touch_demo.wasm
 ```
 
 - 描画: SDL2 ウィンドウ(実機と同じランドスケープ 320x240 の 2 倍拡大)
