@@ -4,7 +4,6 @@ idf_component_register(
     EMBED_FILES
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../wasm-apps/touch_demo/touch_demo.wasm"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../wasm-apps/mp3player/mp3player.wasm"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../../wasm-apps/clicktest/clicktest.wasm"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../wasm-apps/metronome/metronome.wasm"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../wasm-apps/midi_loopback/midi_loopback.wasm"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../wasm-apps/seq_smoke/seq_smoke.wasm"

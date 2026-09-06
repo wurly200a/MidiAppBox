@@ -132,6 +132,14 @@ OTA は不要(無線スタックなし)なので factory 1 本のみ。
 `tone_play` は**どのアプリも呼んでいない**(`play_click` ≡ `tone_play(0)` は別シンボル)。
 移行ステップ 4b で旧発音 API の整理をするときの入力になる。
 
+**追記(2026-09-06、Phase 14)**: 上表は Phase 12 時点(2026-09-06 朝)のスナップショット。
+その後 metronome(Phase 13)・midi_loopback(Phase 14 ステップ1)が `click_schedule` /
+`tone_schedule` / `midi_send` の Start/Stop 副作用から音楽時間軸 API へ移行し、
+clicktest は Phase 14 ステップ2で削除された(利用者ゼロ確認後)。
+`click_schedule` 行・`tone_schedule` 行・`clicktest` 列は削除後は該当なしになる
+(API 自体もステップ3で削除。詳細・削除後のカバレッジ確認は `docs/results/phase14.md`)。
+歴史的な決定根拠として本表はそのまま残す。
+
 ### 判断(残す基準 = 固有カバレッジ、または製品・計測器としての固有役割)
 
 | アプリ | 固有 API | 判定 |

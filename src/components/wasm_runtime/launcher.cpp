@@ -27,8 +27,6 @@ extern const uint8_t touch_demo_wasm_start[] asm("_binary_touch_demo_wasm_start"
 extern const uint8_t touch_demo_wasm_end[]   asm("_binary_touch_demo_wasm_end");
 extern const uint8_t mp3player_wasm_start[] asm("_binary_mp3player_wasm_start");
 extern const uint8_t mp3player_wasm_end[]   asm("_binary_mp3player_wasm_end");
-extern const uint8_t clicktest_wasm_start[] asm("_binary_clicktest_wasm_start");
-extern const uint8_t clicktest_wasm_end[]   asm("_binary_clicktest_wasm_end");
 extern const uint8_t metronome_wasm_start[] asm("_binary_metronome_wasm_start");
 extern const uint8_t metronome_wasm_end[]   asm("_binary_metronome_wasm_end");
 extern const uint8_t midi_loopback_wasm_start[] asm("_binary_midi_loopback_wasm_start");
@@ -217,8 +215,6 @@ bool launcher_prepare_sd(char* status, size_t status_len)
     seed_file(path, touch_demo_wasm_start, touch_demo_wasm_end);
     snprintf(path, sizeof(path), "%s/mp3player.wasm", kAppsDir);
     seed_file(path, mp3player_wasm_start, mp3player_wasm_end);
-    snprintf(path, sizeof(path), "%s/clicktest.wasm", kAppsDir);
-    seed_file(path, clicktest_wasm_start, clicktest_wasm_end);
     snprintf(path, sizeof(path), "%s/metronome.wasm", kAppsDir);
     seed_file(path, metronome_wasm_start, metronome_wasm_end);
     snprintf(path, sizeof(path), "%s/midi_loopback.wasm", kAppsDir);

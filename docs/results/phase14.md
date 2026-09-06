@@ -125,3 +125,63 @@ B 0 0 0 18231 0
 
 許容外の WARN/ERROR 0 件、**結果 PASS**。free heap は Phase 13 の基準値
 (49136)と完全一致(リークなし)。
+
+## ステップ 2: clicktest を削除する
+
+削除前のタグ: **`pre-old-api-removal`**。
+
+### 実施内容
+
+| 対象 | 変更 |
+|---|---|
+| `wasm-apps/clicktest/` | `git rm -r` でディレクトリごと削除(承認済み。Bash 分類器が `rm -rf` / `git rm -r` を破壊的操作としてブロックしたため、ユーザーに確認のうえ実施) |
+| `src/components/wasm_runtime/CMakeLists.txt` | `EMBED_FILES` から `clicktest.wasm` を削除 |
+| `src/components/wasm_runtime/launcher.cpp` | `clicktest_wasm_start/end` の extern 宣言と `seed_file` 呼び出しを削除 |
+| `scripts/device-regress.conf` | `APPS` から `clicktest` を削除(6 本 → **5 本**) |
+| `wasm-apps/README.md` | アプリ一覧から `clicktest/` の行を削除、`midi_loopback/` の説明をステップ1の内容に更新 |
+| `CLAUDE.md` | 回帰対象アプリの列挙を 5 本に更新 |
+| `docs/results/phase12.md` | カバレッジ表(2026-09-06 朝時点のスナップショット)は歴史的決定根拠としてそのまま残し、末尾に Phase 14 の追記節を追加(下記) |
+
+### カバレッジの穴が空かないことの確認
+
+Phase 12 のカバレッジ表(`docs/results/phase12.md`)を Phase 14 時点の実装と
+突き合わせて確認した。
+
+- `click_schedule` / `tone_schedule`: clicktest 削除時点で利用者ゼロ
+  (metronome は Phase 13、midi_loopback は Phase 14 ステップ1で移行済み)。
+  ステップ3で API 自体を削除するため、行ごと消えるのが正しい(コード上の穴ではない)。
+- `play_click`: touch_demo が唯一の残存呼び出し元になるが、これは clicktest 削除前から
+  変わらず健在(touch_demo は継続して残す判断は Phase 12 で確定済み)。**穴なし。**
+- `now_ms`: metronome(長押し連打の時間計測)が引き続きカバー。**穴なし。**
+- `midi_send`(生バイト送出): seq_smoke が CC#119/#120 の送出で引き続きカバー
+  (metronome・midi_loopback は Phase 13/14 で `midi_send` を使わなくなったが、
+  API 自体は残る前提なので seq_smoke のカバレッジで足りる)。**穴なし。**
+- `transport_*` / `tempomap_*` / `seq_*` / `time_us_to_tick`: 従来 seq_smoke のみだったが、
+  metronome(Phase 13)・midi_loopback(Phase 14)も新たにカバーするようになった。
+  **穴が空くどころかカバレッジが増えた。**
+
+`tone_play` は元々どのアプリからも呼ばれておらず(Phase 12 の時点で判明済み)、
+clicktest 削除の影響を受けない。
+
+### バイナリサイズ
+
+| | サイズ |
+|---|---|
+| 削除前(ステップ1 最終、STATLOG フックなし) | 0x100190 = 1,049,488 B |
+| 削除後 | **0xffc40 = 1,048,128 B** |
+
+**−1,360 B**(`.wasm` 1 本 + launcher の extern/seed 呼び出し分)。
+
+### 回帰(5 本、`phase14-step2-regress`)
+
+| アプリ | 開始 free heap | 終了 free heap | 差分 | largest block | 判定 |
+|---|---|---|---|---|---|
+| touch_demo | 49136 | 49136 | +0 | 31744 | PASS |
+| mp3player | 49136 | 49136 | +0 | 31744 | PASS |
+| metronome | 49136 | 49136 | +0 | 31744 | PASS |
+| midi_loopback | 49136 | 49136 | +0 | 31744 | PASS |
+| seq_smoke | 49136 | 49136 | +0 | 31744 | PASS |
+
+許容外の WARN/ERROR 0 件、**結果 PASS**。free heap・largest block とも
+ステップ1と同一(clicktest はネイティブ側の常駐状態を持たなかったため、
+フラッシュのみ減って RAM の水準は変化しない)。
