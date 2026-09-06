@@ -1,14 +1,18 @@
 // Phase 9b Stage 1/2/3: MIDI ループバック診断アプリ
 // (配線チェック・テンポ表示・診断統計)。
-// 自機の MIDI OUT(hostapi_midi_send による Start/Stop、host 内部の
-// 24ppqn クロック生成)を自機の MIDI IN(hostapi_midi_recv)で受信し、
-// 受信生バイトを 16進表示する。パースは一切アプリ側で行う
-// (shared/hostapi_defs.h の "midi" セクション参照、Host API 側はタイム
-// スタンプ付き生バイトを渡すのみ)。
+// 自機の MIDI OUT(Phase 14 で `hostapi_transport_start/stop` に置換。
+// ホストが 40 tick グリッドから MIDI Clock を直接生成する)を自機の
+// MIDI IN(hostapi_midi_recv)で受信し、受信生バイトを 16進表示する。
+// パースは一切アプリ側で行う(shared/hostapi_defs.h の "midi" セクション
+// 参照、Host API 側はタイムスタンプ付き生バイトを渡すのみ)。
 //
-// クロック生成は既存メトロノーム(Phase 7B/8b)と同じ方式: BPM 120 固定で
-// hostapi_click_schedule を毎 tick 再予約し、host がその予約間隔から
-// MIDI Clock の周期を自動導出する(テンポをアプリから明示的に伝えない)。
+// Phase 14(移行ステップ 1)で音楽時間軸 API へ移行: BPM 120 固定で
+// `tempomap_set_tempo(0, 500000)` / `set_meter(0, 4, 4)` を明示設定し、
+// START/STOP は `hostapi_transport_start/stop` に一本化した(テンポの
+// 二重管理・毎拍位相リセットが根本原因だった 9c の経路を廃止)。
+// 本アプリの目的は受信統計(クロックの欠落・ジッタ測定)なので、
+// 可聴クリックは供給しない(条件をクロックだけに絞る判断。
+// docs/results/phase14.md 参照)。
 // ホスト API (module "env") のみ使用。no_std / アロケータ不要。
 #![no_std]
 
@@ -21,10 +25,12 @@ extern "C" {
     fn hostapi_draw_text(x: i32, y: i32, ptr: *const u8, len: u32);
     fn hostapi_fill_rect(x: i32, y: i32, w: i32, h: i32, rgb888: u32);
     fn hostapi_poll_event(buf: *mut u8, buf_len: u32) -> i32;
-    fn hostapi_now_ms() -> u32;
-    fn hostapi_click_schedule(time_ms: i32) -> i32;
-    fn hostapi_midi_send(bytes: *const u8, len: u32) -> i32;
     fn hostapi_midi_recv(buf: *mut u8, buf_len: u32) -> i32;
+
+    fn hostapi_transport_start() -> i32;
+    fn hostapi_transport_stop() -> i32;
+    fn hostapi_tempomap_set_tempo(at_tick: i32, us_per_quarter: i32) -> i32;
+    fn hostapi_tempomap_set_meter(at_tick: i32, numer: i32, denom: i32) -> i32;
 }
 
 #[repr(C)]
@@ -49,9 +55,8 @@ struct MidiRecv {
     _reserved: [u8; 7],
 }
 
-const MIDI_START: [u8; 1] = [0xFA];
-const MIDI_STOP: [u8; 1] = [0xFC];
-const PERIOD_MS: u32 = 500; // BPM 120 固定(診断用の測定条件)
+const BPM: u32 = 120; // 診断用の測定条件(固定)
+const TEMPO_UPQ: i32 = 60_000_000 / BPM as i32; // 500000(120bpm)
 
 const RECV_BUF_LEN: usize = 64; // 1 tick(100ms)分のバーストを吸収するのに十分な余裕
 const RECENT_LEN: usize = 16; // Stage 1 の 16進表示(8バイト x 2行)
@@ -70,8 +75,6 @@ const BTN_W: i32 = 100;
 const BTN_H: i32 = 40;
 
 static mut RUNNING: bool = false;
-static mut ANCHOR: u32 = 0;
-static mut LAST_BEAT: u32 = u32::MAX;
 
 static mut RECENT: [u8; RECENT_LEN] = [0; RECENT_LEN];
 static mut RECENT_COUNT: usize = 0; // 0..=RECENT_LEN(埋まっている件数)
@@ -443,6 +446,19 @@ fn dump_stop_stats() {
         }
         l4.draw(LOG_X, LOG_Y_BASE + 48);
 
+        // 6行目(Phase 14): clocks / expected(画面表示と同じ算出式、
+        // カメラ静止画に頼らず確認できるようにログへ追加)
+        let mut l6 = Line::new();
+        l6.push(b"C clocks=").push_u32(CLOCK_COUNT).push(b" exp=");
+        if FIRST_CLOCK_TS_US == 0 || LAST_CLOCK_TS_US <= FIRST_CLOCK_TS_US {
+            l6.push(b"--");
+        } else {
+            let elapsed_us = (LAST_CLOCK_TS_US - FIRST_CLOCK_TS_US) as i64;
+            let expected = 1 + (elapsed_us / NOMINAL_INTERVAL_US) as u32;
+            l6.push_u32(expected);
+        }
+        l6.draw(LOG_X, LOG_Y_BASE + 80);
+
         // 5行目: 見かけ BPM 分布(24クロック移動平均、5バケット)
         let mut l5 = Line::new();
         l5.push(b"B");
@@ -592,18 +608,15 @@ fn reset_stats() {
     reset_clock_stats();
 }
 
-fn toggle_running(now: u32) {
+fn toggle_running() {
     unsafe {
         RUNNING = !RUNNING;
         if RUNNING {
-            ANCHOR = now;
-            LAST_BEAT = u32::MAX;
             reset_stats();
-            hostapi_midi_send(MIDI_START.as_ptr(), 1);
+            hostapi_transport_start(); // 0xFA を送出、host がクロック生成を開始
         } else {
             dump_stop_stats(); // Phase 9c E1: 全統計値をログ用センチネルへ出力
-            hostapi_click_schedule(0); // 予約キャンセル
-            hostapi_midi_send(MIDI_STOP.as_ptr(), 1);
+            hostapi_transport_stop(); // 0xFC を送出、クロック生成を停止
         }
     }
     draw_button();
@@ -618,8 +631,10 @@ pub extern "C" fn app_init() -> i32 {
         hostapi_draw_text(12, 12, title.as_ptr(), title.len() as u32);
 
         RUNNING = false;
-        ANCHOR = 0;
-        LAST_BEAT = u32::MAX;
+
+        // テンポ/拍子マップは常に at_tick=0 の 1 エントリ(STOPPED 中の初期設定)。
+        hostapi_tempomap_set_meter(0, 4, 4);
+        hostapi_tempomap_set_tempo(0, TEMPO_UPQ);
     }
     reset_stats();
     draw_counts();
@@ -640,23 +655,14 @@ pub extern "C" fn app_tick() {
         hostapi_poll_event(evs.as_mut_ptr() as *mut u8,
                            (8 * core::mem::size_of::<Event>()) as u32)
     };
-    let now = unsafe { hostapi_now_ms() };
     for ev in &evs[..n.max(0) as usize] {
         if ev.ev_type == EV_TOUCH_DOWN && in_button(ev.x, ev.y) {
-            toggle_running(now);
+            toggle_running();
         }
     }
 
-    unsafe {
-        if RUNNING {
-            let elapsed = now.wrapping_sub(ANCHOR);
-            let beat = elapsed / PERIOD_MS;
-            // 次の拍を毎 tick 再予約(host 側の last_fired ガードで二重発音しない)。
-            let next = ANCHOR.wrapping_add((beat + 1) * PERIOD_MS);
-            hostapi_click_schedule(next as i32);
-            LAST_BEAT = beat;
-        }
-    }
+    // MIDI Clock は host(L1)がテンポマップ + transport から生成するため、
+    // アプリは何もしない(旧経路の毎 tick 再予約は Phase 14 で廃止)。
 
     // MIDI IN の受信ドレイン。タイムスタンプは hostapi_midi_recv のレコード値
     // (host が受信直後に打刻した µs 値)のみを使う(app_tick 呼び出しの
