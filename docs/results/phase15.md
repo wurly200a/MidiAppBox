@@ -521,28 +521,74 @@ instantiate: WASM module instantiate failed: allocate linear memory failed
 補足: `-zstack-size` は **16 バイト境界**でなければ `rust-lld` が
 `stack size must be 16-byte aligned` で失敗する(8,249,000 で踏んだ)。
 
-### T-4: 20 回連続再起動 — **未完(1/20 実施で中断)**
+### T-4: 20 回連続再起動 — **PASS**(2026-09-12、run1 からやり直して完遂)
 
-指示書どおり `device-regress.sh` を 20 周させる形で開始したが、**セッションのレート制限
-(95% 到達)によりユーザー判断で 1 周目完了・2 周目の途中で中断した。**
+前回セッションはレート制限により 1/20 で中断していたため、指示書の申し送りどおり
+run1 から測り直した。`device-regress.sh --task phase15-t4/runN` を 20 回連続実行
+(1 回ごとにモニタ再起動 = ボードリセットを伴う)。
 
-| 周 | 結果 |
+| 項目 | 結果 |
 |---|---|
-| run1 | **PASS**(5 アプリ、int 差分 +0 / psram 差分 +0 / largest_int 57,344 / 許容外 WARN・ERROR 0 件) |
-| run2 | 中断(`captures/phase15-t4/run2/monitor.log` のみ残存) |
-| run3〜20 | **未実施** |
+| 完走回数 | **20 / 20** |
+| 各回の 5 アプリ判定 | **全 100 件(20 回 × 5 アプリ)すべて PASS** |
+| int 差分 / psram 差分 | 全件 **+0** |
+| largest_int / largest_psram | 全件 **57,344 / 8,257,536** で不変 |
+| 許容外 WARN/ERROR | 全 20 回で **0 件** |
+| TG1WDT リセット・パニック | **0 件**(`grep -l "TG1WDT\|rst:0x8\|Guru Meditation\|panic"` で全 run 該当なし) |
+| `app_main` 到達 | 20 回全てで 1 回ずつ確認 |
 
-生データ: `captures/phase15-t4/run1/`。**再開時は run1 から測り直すこと**
-(途中の 1 周だけを積み上げても連続性の証明にならない)。
+生データ: `captures/phase15-t4/run1〜20/`。**PSRAM 有効構成での連続再起動安定性を
+20/20 で確認した**(Phase 12 E6 の「E5 迂回構成で 20/20」と同じ結果を、
+本フェーズの本番構成一式(ステップ 2 の全変更込み)でも再現)。
 
-### T-1 / T-2 — **未実施**
+### T-1(metronome の MIDI クロック)— **PASS**(2026-09-12、セッション再開後)
 
-- **T-1(metronome の MIDI クロック)**: 実機 MIDI OUT → UM-ONE → PC の物理配線と、
-  metronome の START/STOP のタップが要るため未実施。UM-ONE がホストに見えていることは
-  確認済み(`aconnect -l` に `client 20: 'UM-ONE'`)。
-- **T-2 の `app_tick` 統計**: 1,000 サンプル = 100 秒かかるため、回帰の保持時間
-  (6〜20 秒)では到達しない。**T-1 の 5.5 分測定で同時に取得する**のが効率的。
-  T-2 のうち **LVGL フラッシュ時間は取得済み**(§2-6)。
+セッション再開時にファームウェアを現在の main(commit `fe0c75c`、`touch_demo` は
+`-zstack-size` 8,192 に復元済み)で再ビルド・再フラッシュし、
+`device-regress.sh --task phase15-t1-baseline` で全 5 アプリ PASS(int/psram 差分 +0、
+largest_int 57,344、警告 0)を確認してから着手。
+
+**(a) 計測系の妥当性確認(実機 seq_smoke、`--segments auto`)**:
+
+| 区間 | クロック数 | 平均間隔 | 見かけ BPM | 外れ値 |
+|---|---|---|---|---|
+| 120bpm | 288 | 20829.7 µs | 120.02 | 0 |
+| 180bpm | 510 | 13888.3 µs | 180.01 | 0 |
+
+Phase 13 の実測(288 発 / 20826.7µs、510 発 / 13888.4µs)と一致。**PSRAM 有効構成でも
+計測系は Phase 13 と同じ精度で機能する。**
+
+**(b) 実機 metronome(実機 MIDI OUT → UM-ONE → PC、120bpm・4/4、アイドル約5.5分)**:
+生データ `captures/phase15/t1-A1.csv`・`.md`。
+
+| 項目 | 結果 | 目標(Phase 13 と同じ絶対値) |
+|---|---|---|
+| 0xF8 総数 / 期待数 | 16,052 / 16,051.9 | — |
+| clocks / expected | **100.00%** | 100% |
+| 外れ値(≥1.5x/≤0.5x) | **0 件** | 0 件 |
+| 見かけ BPM 分布 | **単峰**(min 118.66 / max 121.37) | 単峰 |
+| 平均間隔 | **20832.9 µs** | 20833 ±10µs |
+| 再生区間長 | 334.4 s(1 区間、start→stop) | ~330s |
+| カーネル打刻とユーザ打刻の差 | mean 135µs / max 3022µs | 参考値 |
+
+**PSRAM 有効構成で Phase 13 の絶対値目標をすべて満たした。** 09c の「毎拍位相リセット」
+起因の欠落・二峰性は再発していない。linear memory を PSRAM に移したことによる
+クロック生成タイミングへの悪影響はない。
+
+### T-2(`app_tick` 実行時間とジッタ)— **取得済み**(T-1 と同一測定で採取)
+
+`captures/phase15-t1/monitor.log` より(n=1,000 サンプル、metronome 実行中):
+
+| 指標 | 値 |
+|---|---|
+| tick interval(目標 100,000µs) | min 92,466 / avg 99,992 / p50 100,000 / p95 100,003 / p99 100,003 / max 100,006 µs |
+| **app_tick duration** | min 222 / avg 808 / p50 459 / p95 3,183 / p99 3,204 / **max 27,499 µs** |
+| LVGL flush(参考、§2-6 で採取済み分と別サンプル) | min 439〜511 / avg 540〜802 / max 612〜1,643 µs(複数回) |
+
+**判定: 合格(不合格条件に抵触せず)。** app_tick 最大実行時間 27,499µs は 100ms tick
+周期の **27.5%** で、指示書の「100ms tick 周期を脅かす水準」には遠く及ばない。
+PSRAM 化による悪化(F8 の「32KB を超えるキャッシュミス」由来と推測)は数値として
+記録したのみで、T-1 が通っているため不合格条件にはしない。
 
 ### ステップ 3 のカメラ目視確認 — **未実施**
 
@@ -552,34 +598,188 @@ instantiate: WASM module instantiate failed: allocate linear memory failed
 
 ---
 
-## 中断時点のまとめ(2026-09-06)
+---
 
-### 達成したこと
+## ステップ 4: SDMMC と PSRAM の共存(切り分け、2026-09-12 再開)
+
+### 事前整理: H1〜H4 の状態確認
+
+`docs/results/phase12.md` の表(E1〜E5)を再確認:
+
+| 仮説 | 検証 | 結果 |
+|---|---|---|
+| H1 ピン競合 | 静的解析 | **否定**(SDMMC は CLK=14/CMD=17/D0=16、octal PSRAM は GPIO 33〜37。重複なし) |
+| H4 WDT は SD 以外で発火 | PSRAM 単体構成の再現実験 | **否定**(P10-4 を完全再現、ハングは SD 初期化中で確定) |
+| H5(当時) PSRAM 由来バッファが DMA 経路へ | `CAPS_ALLOC` でも同一失敗 | Phase 12 は否定と判定したが、**Phase 15 §2-8 で再浮上**(`CAPS_ALLOC` は `heap_caps_malloc(..., MALLOC_CAP_DEFAULT)` を止めないため) |
+| E5(迂回) | SDMMC プローブをスキップ | **成立**(正常起動。ただし迂回であって解明ではない) |
+
+### H1 の補足事実(新規)— **SDMMC プローブは SPI 配線を流用している**
+
+`src/main/board_pins.hpp` を確認したところ、**SDMMC プローブの 3 本
+(CLK=GPIO14 / CMD=GPIO17 / D0=GPIO16)は、SDSPI 配線(SCLK=GPIO14 / MOSI=GPIO17 /
+MISO=GPIO16)と完全に同一の物理ピン**である。本ボードの SD カードは
+**SPI モード配線のみ**(CS=GPIO21 は SDMMC 側の `slot_config` に含まれない)。
+
+これは「SDMMC プローブが本ボードで一度も成功したことがない」(Phase 12)理由の
+説明にはなる(SD カードは電源投入後の初回コマンドで SPI/SD どちらのモードに
+入るかが決まり、本配線は SPI モード運用前提のため native SDMMC ハンドシェイクに
+正しく応答できない可能性が高い)。**ただし、これは「PSRAM 無効なら失敗して
+フォールバックする」「PSRAM 有効だとフォールバックせず無限ハングする」という
+挙動差そのものの説明にはならない。** ピン競合(H1)はこの意味でも重ねて否定できる
+(競合ではなく、そもそも native SDMMC がこの配線で成立する見込みが薄いという
+別の要因)。
+
+### H5 の再検証(ソースレベル)— **structurally 否定**
+
+IDF 5.5.5 の SD カード関連ドライバのソースを実機コンテナ内で確認した
+(`docker run --rm <image> grep ...`)。
+
+| 確保箇所 | 使用する cap | PSRAM から取れるか |
+|---|---|---|
+| `esp_driver_sdmmc/src/sdmmc_host.c` の DMA 記述子 `s_dma_desc` | **`DRAM_DMA_ALIGNED_ATTR static`(静的 BSS)** | **取れない**(そもそもヒープ確保ではない) |
+| `components/sdmmc/sdmmc_cmd.c` / `sdmmc_sd.c` / `sdmmc_mmc.c` / `sdmmc_common.c` の CID/CSD/SCR/SSR/response バッファ | `heap_caps_malloc(..., MALLOC_CAP_DMA)` (一部 `\| MALLOC_CAP_INTERNAL`) | **取れない**(下記) |
+| `components/esp_psram/system_layer/esp_psram.c` の PSRAM 領域登録 | `heap_caps_add_region_with_caps({MALLOC_CAP_SPIRAM \| MALLOC_CAP_DEFAULT, ...})` | PSRAM 領域には **`MALLOC_CAP_DMA` が登録されていない** |
+
+**結論: PSRAM 領域は `MALLOC_CAP_DMA` を持たないため、SD カードスタックが
+明示的に `MALLOC_CAP_DMA` を要求するすべての確保は `CAPS_ALLOC` でも
+`USE_MALLOC` でも PSRAM に流れようがない。** さらに SDMMC ホストドライバ自身の
+DMA 記述子は静的 BSS でありヒープ設定と無関係。**H5 は Phase 12 の実験的否定を
+ソースレベルで裏付ける形で再度否定できる。** Phase 15 §2-8 の懸念
+(`heap_caps_malloc(..., MALLOC_CAP_DEFAULT)` が PSRAM を返す)自体は事実だが、
+SD カードスタックの経路には `MALLOC_CAP_DEFAULT` 単体での確保が存在しない
+(唯一の例外 `sd_pwr_ctrl_by_on_chip_ldo.c` の 2 箇所は on-chip LDO 給電制御用の
+小さな**制御構造体**で、本ボード非搭載の外付け LDO 制御用機能のため使われない)。
+
+### H2(初期化順序・タイミング)— 実機実験(2026-09-12)
+
+**実験内容**: `sdcard.cpp` の SDMMC プローブ直前に `vTaskDelay(300ms)` を挿入する
+一時コード(`PHASE15_STEP4_H2_TEST`)を追加し、`sdkconfig.defaults` を一時的に
+`CONFIG_MIDIBOX_SD_SKIP_SDMMC_PROBE=n` にしてプローブを強制的に有効化した
+検証ビルドを実機で確認した。生データ: `captures/phase15-step4-h2/monitor.log`。
+
+**結果 — 重要な新事実。従来の想定(H1〜H5)を覆す**:
+
+```
+I (1836) SDCARD: PHASE15_STEP4_H2_TEST: extra 300ms settle before SDMMC probe
+I (2136) SDCARD: Trying SDMMC host: CLK=14 CMD=17 D0=16
+E (2156) sdmmc_common: sdmmc_init_ocr: send_op_cond (1) returned 0x107
+E (2156) vfs_fat_sdmmc: sdmmc_card_init failed (0x107)
+W (2156) SDCARD: SDMMC mount failed: 263, falling back to SDSPI
+I (2166) sdspi_transaction: cmd=52, R1 response: command not supported
+I (2216) sdspi_transaction: cmd=5, R1 response: command not supported
+[ここで無応答 → TG1WDT_SYS_RST]
+```
+
+- **300ms の待ちを入れると、SDMMC プローブ自体はハングせず正常に(タイムアウトで)
+  失敗し、`falling back to SDSPI` まで到達する。** これは Phase 12・Phase 15
+  ステップ 0 で観測した「`Trying SDMMC host` の直後で無応答」という症状とは
+  明確に異なる。**H2 が原因の一部であることを示す**(300ms の遅延だけで
+  「プローブ中に無応答」という症状は消える)。
+- **しかし新しいクラッシュ地点が判明した: SDSPI フォールバックの SD プロトコル
+  ネゴシエーション中(CMD5 応答直後、次のコマンドの前)で TG1WDT が発火する。**
+  この地点は SDMMC のネイティブプロトコルとは無関係で、**SDSPI 単体のときは
+  一度も問題を起こしたことがない経路**(現行 main は常にこの SDSPI 経路のみを
+  通り、T-4 で 20/20 成功している)。
+- **したがって真因は「SDMMC プローブ単体がハングする」ではなく、「PSRAM 有効時に
+  SDMMC を一度試みてから SDSPI にフォールバックする、という 2 段階の遷移そのものが
+  不安定になる」ことだと判明した。** 同じ物理ピン(CLK/SCLK=14, CMD/MOSI=17,
+  D0/MISO=16)を SDMMC ペリフェラルとして初期化した直後に SPI3 ペリフェラルとして
+  再初期化する際、PSRAM が有効だと(クロック/DMA/キャッシュのいずれかの共有資源が
+  絡んで)状態遷移に失敗すると推測されるが、**この 2 段階遷移を伴わない構成
+  (現行 main: 常に SDSPI のみ)を使う限り、この経路自体を通らないため実害はない。**
+
+**H3(速度組合せ)**: Phase 12 の結論(「E5 が 80MHz/OCT のまま成功したため検証不要」)
+を踏襲。今回の H2 実験でも PSRAM は変わらず 80MHz/OCT のままであり、速度を落とした
+別実験は行わなかった(症状が SDMMC プロトコル自体の速度問題ではなく
+SDMMC→SDSPI 遷移の問題だと判明したため、優先度が下がった)。
+
+**インシデントと復旧**: H2 実験ビルドは実機で TG1WDT の自動リブートループに入った
+(ユーザー確認: 16→27 回)。物理 USB 抜き差しで電源断・復旧を実施。**復旧作業中に
+手順ミスがあった**: 一時変更を `git checkout` で戻したが、`src/sdkconfig`
+(gitignore 対象、ビルドキャッシュ)への手動編集(プローブ無効化)は
+`idf.py build` が実行中に `kconfgen` でファイル全体を正規化し
+`CONFIG_X=n` 形式を `# CONFIG_X is not set` 形式へ書き換えていたため、
+2 回目の sed(`=n` → `=y` 置換)がマッチせず**プローブ有効のまま**残っていた。
+このため 1 回目の「復旧」フラッシュは実質 H2 実験と同一構成になり、
+**300ms 遅延なしでの元来のハング症状(`Trying SDMMC host` 直後で無応答)を再現し、
+2 度目の電源断が必要になった。** `src/build/config/sdkconfig.h` の
+`#define CONFIG_MIDIBOX_SD_SKIP_SDMMC_PROBE 1` を確認してからフラッシュする
+ことで正しく復旧し、`device-regress.sh --task phase15-step4-recovery2` で
+5 アプリ全 PASS(int/psram 差分 +0、警告 0)を確認した。
+**教訓: gitignore 対象の生成物(`sdkconfig` 等)を一時的に手動編集した場合、
+`git diff`/`git status` には現れないため、復旧確認は必ずビルド成果物
+(`sdkconfig.h` 等)側で行うこと。** `docs/lessons.md` に追記する。
+
+### ステップ 4 の結論
+
+| 仮説 | 結論 |
+|---|---|
+| H1(ピン競合) | **否定**(重複ピンなし。ただし SDMMC の 3 本は SDSPI 配線の流用と判明) |
+| H2(初期化順序・タイミング) | **部分的に成立を示唆**。300ms 遅延でプローブ自体のハングは解消するが、
+直後の SDSPI 遷移で新たなハングが発生する。**真因は SDMMC→SDSPI の 2 段階遷移そのもの** |
+| H3(速度組合せ) | Phase 12 の「検証不要」判定を踏襲(未再検証) |
+| H4(WDT が SD 以外で発火) | **否定**(Phase 12 で確定済み、今回も SD 関連コードで発火) |
+| H5(PSRAM 由来バッファが DMA 経路へ) | **ソースレベルで否定**(PSRAM 領域には `MALLOC_CAP_DMA` が
+登録されず、SD カードスタックの確保はすべて `MALLOC_CAP_DMA` を明示要求) |
+
+**最終結論: この基板では「SDMMC プローブ→SDSPI フォールバック」という現在の
+実装のままでは、PSRAM 有効時に安定して両立しない。** 真因は SDMMC ペリフェラルから
+SPI3 ペリフェラルへの遷移(同一物理ピンの再初期化)にあり、SDMMC プロトコル単体や
+ピン競合が原因ではない。**SDSPI 固定(`CONFIG_MIDIBOX_SD_SKIP_SDMMC_PROBE=y`、
+現行 main の構成)を受け入れる。** この経路は T-4 で 20/20 の連続起動が確認できて
+おり実害はない。将来 SD からの波形ストリーミング等でより高速な転送が必要になり
+SDMMC ネイティブモードの復活を検討する場合は、本節の知見(2 段階遷移そのものが
+不安定要因)を踏まえて再調査すること。
+
+## ステップ 3: カメラ目視確認(2026-09-12)
+
+LVGL 描画バッファを PSRAM に置いた(L-a 採用)ため省略できない確認。生データ:
+`captures/phase15-visual/`(`.mp4` 96.77秒・h264 / `.png` 静止画)。
+
+- ユーザーに touch_demo → mp3player(再生→停止)→ metronome(START→STOP)の
+  一連操作を依頼し、動画・静止画で確認。
+- **静止画・動画とも色化け・ティアリング・描画欠けは確認されなかった。**
+  ランチャーメニュー・アプリ一覧の文字・背景色とも正常に表示されている。
+- `psram_dma_direct=1` を立てた効果(§2-6 で数値確認済み)が視覚的にも
+  裏付けられた形。
+
+## ステップ 5: 回帰と文書化(2026-09-12)
+
+- **最終回帰**: T-4(20/20 PASS)、および H2 実験からの復旧確認回帰
+  (`phase15-step4-recovery2`、5 アプリ PASS)の 2 系統で確認済み。
+- `docs/architecture.md` §9(既存の PSRAM 配置表はステップ 2 時点で反映済み)・
+  §11-2(「延期・条件付き go」→ Phase 15 本番反映済みの内容に更新、
+  ステップ 4 の SDMMC/PSRAM 共存結論を追記)を更新した。
+- `docs/lessons.md` に H2 実験で判明した真因(SDMMC→SDSPI の 2 段階遷移)・
+  H5 のソースレベル再否定・gitignore 対象ファイルの復旧確認に関する教訓を追記した。
+- `docs/status.md` を本フェーズ完了として更新する(次項)。
+
+## フェーズ完了(2026-09-12)
+
+### 完了条件の充足状況
 
 | 指示書の完了条件 | 状態 |
 |---|---|
 | 1. ステップ 0 の表が揃い、A〜D のどれを採るかが根拠付きで決まっている | **達成**(A 案 + `CAPS_ALLOC`) |
 | 2. 初期ページ数を引き上げた `.wasm` が実機で起動する(T-3) | **達成**(73,840 B / 8,257,136 B。上限機構も確定) |
-| 3. metronome が Phase 13 と同じ絶対値目標を満たす(T-1) | **未実施** |
-| 4. 20 回連続再起動(T-4)、全アプリ回帰が合格 | **回帰は合格。20 回連続は 1/20 で中断** |
-| 5. SDMMC と PSRAM の共存可否の結論 | **未実施**(ステップ 4。H5 が生きている点だけ記録) |
-| 6. `docs/architecture.md` §9・§11-2 と `docs/lessons.md` の更新 | **§9 と lessons.md は完了。§11-2 は T-1 の結果待ち** |
+| 3. metronome が Phase 13 と同じ絶対値目標を満たす(T-1) | **達成**(clocks/expected 100.00%、外れ値 0、単峰、平均 20832.9µs) |
+| 4. 20 回連続再起動(T-4)、全アプリ回帰が合格 | **達成**(20/20、全 100 件 PASS) |
+| 5. SDMMC と PSRAM の共存可否の結論 | **達成**(「SDSPI 固定を受け入れる」で確定。真因は SDMMC→SDSPI の 2 段階遷移) |
+| 6. `docs/architecture.md` §9・§11-2 と `docs/lessons.md` の更新 | **達成** |
 
 ### 現在の main の構成
 
-**PSRAM 有効のまま残している。** ただし **T-1 が未実施**なので、指示書の
-「T-1 が不合格なら PSRAM 無効に戻す」という条件はまだ検証されていない。
-**次のセッションで最初に T-1 を実施すること。**
+**PSRAM 有効構成のまま確定。** T-1 が絶対値目標をすべて満たしたため、
+指示書の「T-1 が不合格なら PSRAM 無効に戻す」条件には該当しない。
+SD は SDSPI 固定(`CONFIG_MIDIBOX_SD_SKIP_SDMMC_PROBE=y`、既定)。
 
-### 次のセッションでやること(順序)
+### 未実施・次フェーズへの申し送り
 
-1. **T-1**(物理操作あり)。`seq_smoke` で計測系の妥当性確認 → metronome を
-   5.5 分。`./scripts/midi-clock-probe.sh --task phase15 --label A1 --duration 330 --bpm 120`。
-   同じ測定で **T-2 の `app_tick` 統計**も取れる(1,000 サンプル = 100 秒)。
-2. **T-4 を run1 からやり直す**(20 周、約 35 分の無人実行)。
-3. **ステップ 3 のカメラ目視確認**(L-a を採ったので必須)。
-4. **ステップ 4**(SDMMC と PSRAM の共存)。**H1 は否定済み**(SDMMC は
-   CLK=14 / CMD=17 / D0=16、octal PSRAM は GPIO 33〜37 で重ならない。Phase 12 E1 と一致)。
-   **H5 は §2-8 のとおり生き返っているので最初に当たる。**
-5. **ステップ 5**。`docs/architecture.md` §11-2 の改訂、`docs/status.md` の更新
-   (**4c 未実装 = PSRAM の反復リーク監視の穴**を明記すること)。
+- **PSRAM の反復リーク監視(4c)は未実装のまま**(§2-7 で承認済みの繰り越し)。
+  同一アプリを N 回反復したときの非減少判定がない。`scripts/device-regress.sh` に
+  次フェーズで追加すること。
+- **AOT 化・LVGL 描画バッファの internal 固定化への切り戻し検討は指示書のスコープ外**
+  のまま(必要になれば L-b 案が `docs/results/phase15.md` §「想定外の副作用」に用意済み)。
+- **ステップ 4 で判明した SDMMC→SDSPI 2 段階遷移の真因は未確定**(何が具体的に
+  壊れるかは特定していない)。将来 SDMMC ネイティブモードが必要になった場合のみ
+  再調査すればよく、現行 main(SDSPI 固定)には影響しない。

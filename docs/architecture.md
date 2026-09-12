@@ -421,28 +421,67 @@ L0 に音楽的意味が漏れ、キュー実装が複雑化する。採用案�
 song 位置へ変換するが、ループ範囲を設定したのは L3 自身なので剰余計算で
 自力変換でき、**追加 API は不要**である。
 
-### 11-2. PSRAM 不使用 — **延期を維持。ただし Phase 12 で原因を特定し「条件付き go」に更新**
+### 11-2. PSRAM — **Phase 15 で本番反映済み(2026-09-12)**
 
 深さ 256 イベントで要件 1〜5 が足りること(§9 の horizon 表)と、不足時に
-**優雅に劣化する**(破綻モードがない)ことを根拠に、L0 キューは internal 固定で確定。
+**優雅に劣化する**(破綻モードがない)ことを根拠に、L0 キューは internal 固定で確定
+(この結論は PSRAM 有無に関わらず変わらない)。
 
-**Phase 12 作業 4 の結果(2026-09-06)で、切り出していた SDMMC ハングの原因調査は完了した**
-(詳細は `docs/results/phase12.md`):
+**Phase 12 作業 4(2026-09-06)の時点**では「条件付き go」と判定していたが、
+その根拠(「PSRAM を有効にしても largest free block が 31,744 のまま増えないので
+linear memory の逼迫は緩和されない」)は**指標の取り違えだった**。Phase 15 で
+`memory_data` の実アドレスを見たところ、**`CONFIG_SPIRAM=y` にした時点で WASM の
+linear memory は PSRAM(0x3c101820 台)から確保されていた**(internal の
+largest free block が動かなかったのは、そこがもう linear memory の置き場では
+なくなっていたため)。詳細は `docs/results/phase15.md` ステップ 0、
+`docs/lessons.md` の該当項。
 
-- 真因は **SD 初期化の SDMMC プローブ**。ピン競合ではなく(octal PSRAM は GPIO 33〜37、
-  本ボードの使用ピンと重ならない)、PSRAM 由来バッファが DMA 経路に渡る問題でもない
-  (`SPIRAM_USE_CAPS_ALLOC` でも同一の失敗)。プローブを飛ばせば **PSRAM 有効で
-  20 回連続起動**し、既存アプリの回帰にも劣化がない。
-- **ただし PSRAM を有効にするだけでは largest free block は 31,744 のまま増えない**
-  (internal free は +42KB 増えるが、最大連続ブロックは独立した 32KB DRAM 領域が
-  与える構造的上限)。**WASM linear memory の逼迫は 1 バイトも緩和されない。**
-- さらに、プローブを飛ばすと SD が常に SDSPI 経路になり、その構成では最大連続ブロックが
-  15,360 まで落ちて WASM が起動できなくなる(no-PSRAM で実証)。
+**採用構成(A 案 + `CONFIG_SPIRAM_USE_CAPS_ALLOC`、`sdkconfig.defaults` のみの変更)**:
 
-したがって **判定は「条件付き go」**。本番反映は
-「SDMMC プローブの扱い + SDSPI 経路のメモリ消費対策 + WAMR プール / linear memory の
-PSRAM 移動」を**一体で行う別フェーズ**とし、その完了条件に `midi_loopback` E1 による
-タイミング検証を含める。**現行 main は no-PSRAM 構成のままである。**
+- `CONFIG_SPIRAM=y` / `CONFIG_SPIRAM_MODE_OCT=y` / `CONFIG_SPIRAM_SPEED_80M=y` /
+  `CONFIG_SPIRAM_USE_CAPS_ALLOC=y`。`managed_components/` の書き換えは不要。
+- WASM linear memory・LVGL 描画バッファは PSRAM へ(§9 の表)。L0/L1・テンポマップ・
+  WAMR プール・タスクスタック・DMA バッファは internal 固定のまま(§9 の方針は不変)。
+- **SDMMC プローブは恒久的にスキップし、SD は SDSPI 固定**
+  (`CONFIG_MIDIBOX_SD_SKIP_SDMMC_PROBE`、既定 `y if SPIRAM`)。理由は下記。
+
+**実測結果(絶対値目標、Phase 13 と同一条件)**:
+
+- **T-1(metronome の MIDI クロック)**: clocks/expected **100.00%**、外れ値 **0 件**、
+  見かけ BPM **単峰**、平均間隔 **20832.9µs**(目標 20833±10µs)。PSRAM 化による
+  クロック生成タイミングへの悪影響なし。
+- **T-2(app_tick 実行時間)**: 最大 27.5ms(100ms tick 周期の 27.5%、悪化はするが
+  許容範囲)。
+- **T-3(引き上げた初期ページ数の起動)**: `-zstack-size` を上げた `touch_demo` で
+  linear memory 73,840 B(internal の最大連続ブロック 57,344 を超える)および
+  8,257,136 B(基準の約 500 倍)が実機で起動。**上限は PSRAM の最大連続ブロックで
+  決まり、internal ヒープの制約から完全に切り離された**(本フェーズの目的そのもの)。
+- **T-4(20 回連続再起動)**: **20/20 成功**、int/psram 差分すべて +0、警告 0。
+
+**SDMMC と PSRAM の共存可否(ステップ 4)— 「この基板ではネイティブ SDMMC は
+使わない」で確定**:
+
+- H1(ピン競合)・H4(WDT が SD 以外で発火)・H5(PSRAM 由来バッファが DMA 経路へ)は
+  いずれも否定(H5 はソースレベルで再否定: PSRAM 領域には `MALLOC_CAP_DMA` が
+  登録されず、SD カードスタックの確保はすべて `MALLOC_CAP_DMA` を明示要求するため
+  PSRAM には流れようがない)。
+- **H2(初期化順序)の実験で新事実が判明**: SDMMC プローブ直前に 300ms の遅延を
+  入れると、プローブ自体は正常にタイムアウト失敗して SDSPI へフォールバックする
+  (Phase 12 が観測した「プローブ直後で無応答」は消える)。**しかし直後の SDSPI
+  プロトコルネゴシエーション中(CMD5 応答直後)で新たに TG1WDT が発火する。**
+  真因は SDMMC プロトコル単体ではなく、**同一物理ピンを SDMMC ペリフェラルとして
+  初期化した直後に SPI3 ペリフェラルとして再初期化するという 2 段階遷移**が
+  PSRAM 有効時に不安定になることにある。SDSPI 単体(現行 main の経路)ではこの
+  問題は一度も発生していない(T-4 で 20/20 実証済み)。
+- **結論: 本ボードでは「SDMMC を試みてから SDSPI にフォールバックする」実装のままでは
+  PSRAM と安定して両立しない。SDSPI 固定を受け入れる。** 将来 SD からの波形
+  ストリーミング等でより高速な転送(SDMMC ネイティブモード)が必要になった場合は、
+  本節の知見(2 段階遷移そのものが不安定要因)を踏まえて再調査すること。
+  詳細は `docs/results/phase15.md` ステップ 4。
+
+**既知の未実装(次フェーズへの申し送り)**: PSRAM 側のリーク監視は
+「1 回の起動→停止の差分」までで、同一アプリを N 回反復したときの非減少判定は
+未実装(`scripts/device-regress.sh` の 4c、`docs/status.md` 参照)。
 
 ### 11-3. `click_schedule` / `tone_schedule` の削除時期 — **イベント基準で確定**
 

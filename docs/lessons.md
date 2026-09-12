@@ -143,6 +143,28 @@ herdr 運用・ビルド手順そのものの教訓は `docs/workflow.md` に一
   `free_int=` は前半と末尾の `[start …]` の両方にあり、`sed` の `.*` は貪欲なので
   切り分けずに読むと**最後の出現 = 開始値**を拾い、差分が常に 0 になって
   **リーク検出が黙って無効化される**(15)。
+- **「SDMMC プローブがハングする」という Phase 12 の理解は不正確だった。** 300ms の
+  遅延を挿入すると SDMMC プローブ自体は正常にタイムアウト失敗して SDSPI へ
+  フォールバックする。**真のハング地点は SDSPI フォールバックの SD プロトコル
+  ネゴシエーション中(CMD5 応答直後)であり、SDMMC のネイティブプロトコルとは
+  無関係。** 真因は「同一物理ピンを SDMMC ペリフェラルとして初期化した直後に
+  SPI3 ペリフェラルとして再初期化する 2 段階遷移」が PSRAM 有効時に不安定になる
+  ことで、SDMMC 単体の速度・ピン競合の問題ではない。SDSPI 単体(現行 main の経路)
+  では一度もこの問題が起きていない(15 ステップ4)。
+- **PSRAM 領域には `MALLOC_CAP_DMA` が登録されない**
+  (`esp_psram.c` の `heap_caps_add_region_with_caps` は `MALLOC_CAP_SPIRAM | MALLOC_CAP_DEFAULT`
+  のみ付与)。したがって `heap_caps_malloc(..., MALLOC_CAP_DMA)` を明示要求する
+  確保(SD カードスタックの CID/CSD/response バッファ等)は `CAPS_ALLOC` でも
+  `USE_MALLOC` でも PSRAM に流れようがない。「PSRAM 由来バッファが DMA 経路へ」
+  という仮説を検証するときは、まず該当コードが実際にどの cap で確保しているか
+  (`MALLOC_CAP_DMA` か `MALLOC_CAP_DEFAULT` か)をソースで確認すること(15 ステップ4)。
+- **gitignore 対象の生成物(`sdkconfig` 等)を一時的に手動編集したら、
+  `git diff`/`git status` だけで「元に戻った」と判断しないこと。** `idf.py build` は
+  `kconfgen` で `sdkconfig` 全体を正規化し、`CONFIG_X=n` のような手書き形式を
+  `# CONFIG_X is not set` に書き換えることがある。この正規化後に当初の sed
+  パターン(`=n` を探す)が一致せず、値が意図せず残ったまま次のビルドに使われた
+  実績がある。**復旧確認は必ずビルド成果物側**(`build/config/sdkconfig.h` の
+  `#define` 行)で行うこと(15 ステップ4)。
 
 ## ホスト共通(Phase 11 で得たもの)
 - 実機と Linux ホストで**同じロジックを二重に書かない**。L0/L1 は

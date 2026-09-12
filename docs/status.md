@@ -363,7 +363,7 @@ CLAUDE.md から独立して更新する(CLAUDE.md 本体は書き換えない)�
     タイムスタンプ線速補正(docs/hostapi.md §7)も未実施のまま持ち越し。
 
 - **Phase 15(docs/prompts/phase15.md、PSRAM 本番反映 = WASM linear memory の
-  PSRAM 移行)進行中・中断(2026-09-06)。** 詳細は `docs/results/phase15.md`、
+  PSRAM 移行)完了(2026-09-12)。** 詳細は `docs/results/phase15.md`、
   設計は `docs/design/phase15-psram.md`。
   - **Phase 12 の「PSRAM を有効にしても効果なし」判定は誤りだった。** largest free block が
     31,744 のまま動かなかったのは事実だが、**linear memory がその領域から出て PSRAM へ
@@ -384,16 +384,33 @@ CLAUDE.md から独立して更新する(CLAUDE.md 本体は書き換えない)�
   - **回帰の指標を internal / PSRAM の 4 値に改訂**(`app: stopped free_int=… largest_int=…
     free_psram=… largest_psram=…`)。判定を「余裕の監視 = 下限しきい値」と
     「リーク検出 = 差分の厳密一致」に分離した(`scripts/device-regress.{sh,conf}`)。
-  - **既知の穴(本フェーズで新設した監視の未完部分)**: **PSRAM のリーク監視は
+  - **T-1(metronome の MIDI クロック、2026-09-12)達成**: 実機 MIDI OUT → UM-ONE → PC、
+    120bpm・4/4・アイドル約5.5分で **clocks/expected 100.00% / 外れ値 0件 /
+    見かけ BPM 単峰 / 平均間隔 20832.9µs**(目標 20833±10µs)。Phase 13 と同じ
+    絶対値目標をすべて満たし、PSRAM 有効構成のまま確定した(指示書の「T-1 不合格なら
+    PSRAM 無効に戻す」条件には該当しない)。
+  - **T-2(app_tick 実行時間、2026-09-12)取得済み**: 最大 27,499µs(100ms tick 周期の
+    27.5%)。悪化はあるが不合格条件(周期を脅かす水準)には該当しない。
+  - **T-4(20 回連続再起動、2026-09-12)達成**: run1 からやり直し、**20/20 成功**
+    (int/psram 差分すべて +0、largest_int 57,344 で不変、警告 0)。
+  - **ステップ 3(カメラ目視確認、2026-09-12)完了**: touch_demo / mp3player / metronome
+    の一連操作を録画・静止画で確認。色化け・ティアリング・描画欠けなし。
+  - **ステップ 4(SDMMC と PSRAM の共存、2026-09-12)完了、結論「SDSPI 固定を受け入れる」**。
+    H1(ピン競合)・H4(WDT が SD 以外で発火)・H5(PSRAM 由来バッファが DMA 経路へ)は
+    いずれも否定(H5 はソースレベルで再否定: PSRAM 領域には `MALLOC_CAP_DMA` が
+    登録されず、SD カードスタックの確保はすべて `MALLOC_CAP_DMA` を明示要求するため
+    PSRAM には流れようがない)。**H2(初期化順序)の実機実験で新事実が判明**:
+    SDMMC プローブ直前に 300ms 遅延を入れるとプローブ自体は正常に失敗して SDSPI へ
+    フォールバックするが、**直後の SDSPI プロトコルネゴシエーション中(CMD5 応答直後)で
+    新たに TG1WDT が発火する**。真因は SDMMC プロトコル単体ではなく、
+    **同一物理ピンを SDMMC ペリフェラルとして初期化した直後に SPI3 ペリフェラルとして
+    再初期化する 2 段階遷移が PSRAM 有効時に不安定になること**。SDSPI 単体
+    (現行 main の経路)ではこの問題は一度も発生していない(T-4 で 20/20 実証)。
+    将来 SD からの高速転送(SDMMC ネイティブモード)が必要になった場合のみ
+    この知見を踏まえて再調査すればよい。
+  - **既知の穴(次フェーズへの申し送り)**: **PSRAM のリーク監視は
     「1 回の起動→停止の差分」までで、同一アプリを N 回反復したときの非減少判定
     (4c)は未実装。** linear memory が PSRAM から取られる以上ここは実質的な監視点なので、
     次フェーズで入れること。
-  - **未実施: T-1(MIDI クロック)・T-2 の `app_tick` 統計・T-4(20 回連続。1/20 で中断)・
-    ステップ 3 のカメラ目視確認・ステップ 4(SDMMC と PSRAM の共存)。**
-    **main は PSRAM 有効のまま残しているが、T-1 が未検証**であることに注意
-    (指示書は「T-1 が不合格なら PSRAM 無効に戻す」としている)。
-  - ステップ 4 への申し送り: **H1(ピン競合)は否定**(SDMMC は CLK=14/CMD=17/D0=16、
-    octal PSRAM は GPIO 33〜37)。**H5(PSRAM 由来バッファが DMA 経路へ)は生きている** —
-    Phase 12 は `CAPS_ALLOC` でも同じ失敗だったことを根拠に否定したが、
-    **`CAPS_ALLOC` は `heap_caps_malloc(..., MALLOC_CAP_DEFAULT)` を internal に留めない**
-    (`malloc()` の実体だけが `MALLOC_CAP_INTERNAL` を足して呼び直す実装)。
+  - **main は PSRAM 有効構成で確定**(`CONFIG_SPIRAM=y` + `CAPS_ALLOC`、
+    SD は SDSPI 固定)。`docs/architecture.md` §9・§11-2、`docs/lessons.md` を更新済み。
