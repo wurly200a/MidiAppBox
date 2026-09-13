@@ -12,6 +12,7 @@ ESP32-S3-Touch-LCD-2.8 (Waveshare) ベースの音楽デバイスファームウ
   **セッションの最初に必ず全体を読むこと。** herdr/hpane に関する記載は
   本ファイルには置かず、すべてこちらに一本化している。
 - **docs/status.md**: 現在地(進捗状況)。
+- **docs/roadmap.md**: フェーズ計画の**唯一の情報源**。
 - **docs/architecture.md**: アーキテクチャ方針。
 - **docs/lessons.md**: 教訓チェックリスト(herdr/ビルド以外の技術的教訓。
   herdr/ビルド関連は docs/workflow.md 側)。
