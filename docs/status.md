@@ -444,3 +444,23 @@ CLAUDE.md から独立して更新する(CLAUDE.md 本体は書き換えない)�
     `OP_STOP`)を推奨**。
   - ファームウェア・Linux ホスト・`shared/`・既存 5 アプリ・Host API は変更していない(回帰不要)。
   - **次**: Phase 17(Host API の追加、承認ゲート)の指示書作成。
+
+- **Phase 17(docs/prompts/phase17.md、テンポ / 拍子マップの寿命管理と小節境界での停止)完了(2026-09-13)。**
+  詳細は `docs/results/phase17.md`、決定記録は `docs/architecture.md` §11-10。
+  - **Host API を追加(方式 B'、承認済み)**:
+    - `hostapi_tempomap_clear()`: STOPPED 中のみ使え、マップとループを空にする。
+    - **満杯時の畳み込み**: PLAYING 中にマップが満杯になったときだけ、通過済みの区間を 1 件に畳む。小節番号の起点を保持する。
+    - `HOSTAPI_SEQ_OP_STOP`: 指定 tick で停止し、その tick のクロックは出さない。
+  - **既存アプリの挙動は変わらない**(マップが満杯にならないため)。
+    同じアプリで再生を始め直すときは `stop → clear → 初期値 → start`。
+  - **検証(すべて合格)**:
+    - Linux の C 単体テスト `hosts/linux/tests/seq_core_test.c`(偽の時計、`ctest`)**10/10**
+    - `seqcore_selftest` は実機・Linux とも PASS
+    - seq_smoke(8 → 12 項目)は実機・Linux とも **chk 4095**
+    - **V3 境界停止**: 最終区間のクロックがちょうど 288 発、Stop 後 0 発(両ホスト、probe と aseqdump)
+    - **V4 metronome**: 100.00% / 外れ値 0 / 単峰 / 20832.8µs
+  - **回帰**: 実機 5 本 PASS(差分 +0、largest_int 57,344 不変、警告 0)、Linux 5 本も警告 0。
+  - **ツール**:
+    - `midi-clock-probe` に「区間ごと / 停止中のクロック数」を追加
+    - `device-regress.conf` の seq_smoke 保持時間を 60 秒に変更
+  - **次**: Phase 18(Session 画面 + 単体再生)の指示書作成と、そのときの `docs/roadmap.md` 更新。
