@@ -1,0 +1,11 @@
+[package]
+name = "seqcore"
+version = "0.1.0"
+edition = "2021"
+
+# Sequencer app のコア(Host API 非依存)。アプリではないので rlib のまま。
+# 仕様: docs/apps/sequencer/spec.md / 記録: docs/results/phase16.md
+
+[features]
+# ホストでのテスト用の出口。コードは std を使わない
+std = []

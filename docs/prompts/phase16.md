@@ -91,4 +91,5 @@ Sequencer app の中核ロジックを **Host API に依存しない `no_std` cr
 
 ## 追記（スコープ変更）
 
-- （日付: 内容）
+- 2026-09-13: **スコープ 3(SL MK3 実機実験)を削除する**(ユーザー判断)。SL MK3 は ch16 の Program Change で Session を読み込み、既定は即時切替、番号に 64 を足すと再生中パターンの末尾へキューされる。この公開仕様どおりであることをユーザーが確認済みのため、実験は不要。Q1 / Q2 はこの仕様から回答し、`PC_LEAD_TICKS` の暫定値も仕様から導く。使い捨て app(`pc_probe`)は作らない。
+- 2026-09-13: ステップ 0 の報告(`docs/results/phase16.md`)を承認。crate の位置は `wasm-apps/seqcore/`、依存 crate は追加しない。実装記録は `docs/results/phase16.md` に一本化する(`docs/dev-log.md` は存在しない)。「前提」の `apps/` は `wasm-apps/` と読み替える。

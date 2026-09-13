@@ -414,3 +414,33 @@ CLAUDE.md から独立して更新する(CLAUDE.md 本体は書き換えない)�
     次フェーズで入れること。
   - **main は PSRAM 有効構成で確定**(`CONFIG_SPIRAM=y` + `CAPS_ALLOC`、
     SD は SDSPI 固定)。`docs/architecture.md` §9・§11-2、`docs/lessons.md` を更新済み。
+
+## 2026-09-13 時点
+
+- **Sequencer トラックを開始。** 仕様 `docs/apps/sequencer/spec.md`、フェーズ計画は
+  `docs/roadmap.md`(「① フェーズ計画 / ② フェーズ未割当の課題」の 2 部構成に再編。
+  以後のフェーズ計画はここだけを更新する)。**MIDI Clock の 115–119bpm 問題はクローズ**
+  (Phase 9c〜14 で解決済み・再発なし。roadmap U-1)。
+
+- **Phase 16(docs/prompts/phase16.md、Sequencer コアと Host API ギャップ分析)完了(2026-09-13)。**
+  詳細は `docs/results/phase16.md`。
+  - **`wasm-apps/seqcore/`** を新設。Host API に依存しない `no_std` の rlib で、依存 crate は 0 個
+    (`heapless` の代わりに自前の `FixedVec`)。データモデル(spec §3)・解決規則
+    (`effective_tempo` / `effective_meter`)・Transport 状態機械(Song / Session scope、
+    4 通りのトグル、`QueuedAction`)を持ち、小節境界で送るべきもの(Start / Stop / PC /
+    テンポ / 拍子)を `BarEvents` として値で返す。**`cargo test --features std` 34 passed、
+    wasm32(no_std)ビルド成功。**
+  - **スコープ変更**: SL MK3 の実機実験は削除(公開仕様どおりとユーザーが確認)。
+    **ch16 の PC 0..=63 は即時、+64 で再生中パターンの末尾へキュー。** Session 境界は
+    キューモードで送り、`PC_LEAD_TICKS = 24`(24ppqn = 4 分音符、暫定)。
+    再生開始時の PC は `transport_start` がキューを空にするため `hostapi_midi_send` で先に送る。
+  - **メモリ**: Bank 9,842 B(ホスト = wasm32 で一致するよう長さを u8 で持つ)。上限定数は据え置き。
+    `Option<Session>` の niche で `Bank::new()` が非ゼロになり `.wasm` の .data を太らせる
+    ことをテストで見つけ、空きを `bars == 0` で表す形にした(教訓を `docs/lessons.md` に追加)。
+  - **Host API ギャップ**: H1–H6 は既存 API で足りる。**新規は H8(テンポ / 拍子マップが
+    `transport_start` で消えず、上限 32 件で長時間再生すると枯渇する)と H9(境界同期の停止)。**
+    拍・小節イベントの通知と境界同期の locate は不要(song tick を単調なタイムラインとして使う)。
+    Phase 17 の方式案 A / B / C を比較し **B(`tempomap_clear` + 通過済みエントリの剪定 +
+    `OP_STOP`)を推奨**。
+  - ファームウェア・Linux ホスト・`shared/`・既存 5 アプリ・Host API は変更していない(回帰不要)。
+  - **次**: Phase 17(Host API の追加、承認ゲート)の指示書作成。

@@ -1,8 +1,10 @@
 # Sequencer App — 要求・仕様 (v0.1 draft)
 
 - 対象: MidiAppBox 上で動作する最初の本格アプリ「Sequencer」
-- 状態: 設計ドラフト。Phase 16 以降で確定する項目は `[Phase で確定]` と明記する
+- 状態: 設計ドラフト。Phase 16 以降で確定する項目は `[Phase で確定]` と明記する。
+  **Phase 16 で確定した項目は `[Phase 16 で確定]` とし、根拠は `docs/results/phase16.md` にある**
 - 元資料: `MetronomeAppSpec.pptx`（画面ラフ）、2026-09-13 のレビュー議論
+- 実装: コア（§3 データモデル・§3.2 解決規則・§4 Transport）は `wasm-apps/seqcore/`（Phase 16）
 
 ---
 
@@ -61,34 +63,38 @@ v1 の Session は「長さ・拍子・PC 番号だけを持つ空の容れ物�
 
 ## 3. データモデル
 
-`no_std` / 固定長を前提とした Rust 表現。上限値は暫定であり Phase 16 でメモリ見積もりと合わせて確定する。
+`no_std` / 固定長を前提とした Rust 表現。上限値は **Phase 16 のメモリ見積もりで確定** した（`[Phase 16 で確定]`、Bank 全体で 9,842 B）。
 
 ```rust
 pub type SessionId = u8;   // 0..=MAX_SESSIONS-1
 pub type ChapterIdx = u8;  // Song 内インデックス
 
-pub const MAX_SESSIONS: usize = 64;          // SL MK3 の Session 数に合わせる [Phase で確定]
+pub const MAX_SESSIONS: usize = 64;          // SL MK3 の Session 数（PC 0..=63） [Phase 16 で確定]
 pub const MAX_BARS_PER_SESSION: usize = 16;
+pub const MAX_SESSIONS_PER_CHAPTER: usize = 16; // [Phase 16 で追加] 旧版は MAX_BARS_PER_SESSION を流用していた
 pub const MAX_CHAPTERS_PER_SONG: usize = 16;
 pub const MAX_ARRANGEMENT_LEN: usize = 32;
 pub const MAX_TEMPO_TRIGGERS: usize = 16;
 pub const MAX_SONGS: usize = 8;
+pub const NAME_LEN: usize = 16;
+
+pub struct Name([u8; NAME_LEN]);               // UTF-8、NUL 詰め、文字境界で切り詰め [Phase 16 で確定]
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct TimeSig { pub num: u8, pub den: u8 }   // 4/4, 3/4, 6/8, 2/4 ...
 
 pub struct Session {
     pub id: SessionId,
-    pub name: Name,                   // 固定長文字列 [Phase で確定]
-    pub program: u8,                  // 送信する PC 番号 (0..=127)
-    pub bars: u8,                     // 小節数 (1..=MAX_BARS_PER_SESSION)
+    pub name: Name,
+    pub program: u8,                  // SL MK3 の Session 番号 (0..=63)。キュー時は +64 して送る（§4.2）
+    pub bars: u8,                     // 小節数 (1..=MAX_BARS_PER_SESSION)。0 は Bank の空きスロット
     pub meter: TimeSig,               // Session 既定の拍子
     pub bar_meter: [Option<TimeSig>; MAX_BARS_PER_SESSION], // 小節単位の上書き
 }
 
 pub struct Chapter {
     pub name: Name,
-    pub sessions: heapless::Vec<SessionId, MAX_BARS_PER_SESSION>, // 参照列
+    pub sessions: FixedVec<SessionId, MAX_SESSIONS_PER_CHAPTER>, // 参照列
 }
 
 /// Song 内の絶対位置（arrangement 上の位置）
@@ -104,16 +110,22 @@ pub struct TempoTrigger { pub at: SongPos, pub bpm: u16 }
 pub struct Song {
     pub name: Name,
     pub default_bpm: u16,
-    pub chapters: heapless::Vec<Chapter, MAX_CHAPTERS_PER_SONG>,
-    pub arrangement: heapless::Vec<ChapterIdx, MAX_ARRANGEMENT_LEN>,
-    pub tempo_triggers: heapless::Vec<TempoTrigger, MAX_TEMPO_TRIGGERS>, // at 昇順
+    pub chapters: FixedVec<Chapter, MAX_CHAPTERS_PER_SONG>,
+    pub arrangement: FixedVec<ChapterIdx, MAX_ARRANGEMENT_LEN>,
+    pub tempo_triggers: FixedVec<TempoTrigger, MAX_TEMPO_TRIGGERS>, // at 昇順
 }
 
 pub struct Bank {                       // 装置全体の保持データ
-    pub sessions: [Option<Session>; MAX_SESSIONS],
-    pub songs: heapless::Vec<Song, MAX_SONGS>,
+    pub sessions: [Session; MAX_SESSIONS],  // id を添字にする。bars == 0 が空き
+    pub songs: FixedVec<Song, MAX_SONGS>,
 }
 ```
+
+実装上の決定（Phase 16。理由の詳細は `docs/results/phase16.md`「仕様からの逸脱」）:
+
+- `heapless::Vec` の代わりに自前の `FixedVec<T, N>`（長さ `u8`）を使う。依存 crate を増やさないためと、ホストと wasm32 で `size_of` を一致させるため
+- `Bank.sessions` は `[Option<Session>; N]` ではなく `[Session; N]`（`bars == 0` が空き）。`Option<Session>` は niche 最適化で None が非ゼロのビット列になり、`static` の Bank が .bss に落ちず `.wasm` を太らせるため。読み出しは `Bank::session(id) -> Option<&Session>`
+- サイズ（wasm32 / ホスト共通）: `Session` 69 B、`Chapter` 33 B、`Song` 678 B、`Bank` 9,842 B、`Transport` 24 B
 
 ### 3.1 拍子とテンポの置き場所（設計判断）
 
@@ -149,13 +161,19 @@ pub enum Scope {
 
 pub struct Position { pub song_pos: Option<SongPos>, pub session: SessionId, pub bar: u8, pub beat: u8 }
 
-pub enum Transport {
+pub enum State {
     Stopped,
     Playing { scope: Scope, pos: Position, queued: Option<QueuedAction> },
 }
 
-pub enum QueuedAction { Stop, Jump(SongPos) }   // 次の小節境界で実行
+/// [Phase 16] 旧版の enum Transport を State とし、Transport の現在テンポ（§3.2）と現在の拍子を足した
+pub struct Transport { state: State, bpm: u16, requested_bpm: Option<u16>, meter: TimeSig }
+
+pub enum QueuedAction { Stop, Jump(SongPos), JumpBar(u8) }   // 次の小節境界で実行。JumpBar は Session scope 用 [Phase 16 で追加]
 ```
+
+小節境界で `Transport::advance_bar()` を呼ぶと、境界で送るべきもの（Start / Stop / PC / テンポ / 拍子）が値（`BarEvents`）で返る。
+Transport は `Copy` なので、複製して進めれば境界より前に次の小節の内容を知れる（PC の先行送信に使う）。
 
 ### 4.1 v1 の再生トグル（Session 画面のみ）
 
@@ -169,20 +187,29 @@ pptx の右上 2 トグルを Session 画面（Bar 一覧）にのみ実装す�
 | ON | ON | 選択した小節だけ繰り返し（練習ループ） |
 
 トグルは再生中にも変更でき、**次の小節境界から**反映する。
+再生中に `1` を ON にした場合は、次の境界で選択小節へ移り、（矢印 OFF なら）それを弾き終えたら停止する `[Phase 16 で確定]`。
 Song / Chapter 画面への横展開は後続 Phase とし、v1 の Song 再生は「arrangement 全体を 1 回再生して停止」に固定する。
 
 ### 4.2 境界イベントとMIDI出力
 
 | タイミング | 動作 |
 |---|---|
-| Play 開始 | MIDI Start、（Song scope なら）先頭 Session の PC を送信 |
+| Play 開始 | MIDI Start、（Song scope なら）先頭 Session の PC を **即時モード**（+64 なし）で Start の前に送信 |
 | 拍頭 | メトロノーム click（1 拍目はアクセント） |
 | 小節境界 | 有効拍子・有効テンポの再評価、QueuedAction の実行、トグル変更の反映 |
-| Session 境界 | 次 Session の PC を送信 |
+| Session 境界 | 次 Session の PC を **キューモード**（+64）で境界の `PC_LEAD_TICKS` 手前に送信。同じ Session が続けて参照されていても、arrangement 上の枠が変わるたびに送る |
 | 停止 | MIDI Stop |
 
-**PC の送信先行量**: SL MK3 が PC を即時に反映するか、パターン末尾で反映するかに依存する。
-`PC_LEAD_TICKS`（24ppqn 単位）を定数として持ち、値は **Phase 16 の実機実験で確定** する `[Phase で確定]`。
+**SL MK3 の PC 仕様** `[Phase 16 で確定]`（Novation の公開仕様。ユーザー確認済み）:
+
+- **ch16** の Program Change で Session を読み込む。Bank Select は不要
+- 番号 0..=63 は **即時** に切り替わる。**+64 すると再生中パターンの末尾へキュー** される
+
+**PC の送信先行量**: `PC_LEAD_TICKS = 24`（24ppqn = 4 分音符 1 つ） `[Phase 16 で確定・暫定]`。
+キューモードでは切替タイミングを SL MK3 自身のパターン末尾が決めるので、送信側に要求されるのは「最後のパターン周回に入ってから、境界より前に届く」ことだけである。
+4 分音符 1 つは、240bpm でも 250ms の余裕があり、パターン長が 4 分音符以上なら最後の周回に収まる。
+PC は `seq_write(port=DIN_OUT)` で tick に予約するので、`app_tick` のジッタには依存しない。
+（未検証の前提: SL MK3 のパターンが 4 分音符より短くないこと、トラックごとにパターン長が異なる場合の「末尾」の定義。Phase 19 の end-to-end で確認する）
 
 ### 4.3 タイミングの責務分担
 
@@ -235,15 +262,19 @@ Session 画面は両ルートから **同じ画面** に到達する。
 
 既存 API 名は Claude Code が `managed_components/` と Host API 定義を読んで確認すること。以下は要求であり名称は仮。
 
+**Phase 16 の判定**（`[Phase 16 で確定]`、詳細は `docs/results/phase16.md`「Host API ギャップ分析」）を「既存 / 新規」列に反映した。
+
 | # | 要求 | 既存 / 新規 | 備考 |
 |---|---|---|---|
-| H1 | テンポ設定（次の小節境界から有効） | 既存の拡張？ | 現行が即時反映なら境界同期の追加が必要 |
-| H2 | 拍子設定（次の小節境界から有効） | 新規の可能性 | click のアクセント位置に影響 |
-| H3 | 拍 / 小節イベントの取得（`app_tick` 内でポーリング可能な形） | 新規の可能性 | 位置 (bar, beat) と発生時刻 |
-| H4 | MIDI Program Change 送信 | 既存（生バイト送信） | 3 バイト送信で足りる想定 |
-| H5 | MIDI Start / Stop 送信 | 既存（Phase 9a） | |
-| H6 | メトロノーム click ON/OFF、アクセント | 既存の拡張？ | |
+| H1 | テンポ設定（次の小節境界から有効） | **既存** `hostapi_tempomap_set_tempo(at_song_tick, upq)` | 未来の at_tick を指定すれば境界同期になる。**ただしマップは 32 件で、消す・クリアする語彙が無い**（H8） |
+| H2 | 拍子設定（次の小節境界から有効） | **既存** `hostapi_tempomap_set_meter(at_song_tick, n, d)` | H1 と同じ制約 |
+| H3 | 拍 / 小節イベントの取得（`app_tick` 内でポーリング可能な形） | **既存** `hostapi_transport_get_position` のポーリングで足りる | 表示は最大 1 app_tick 遅れる。発音・PC は tick 予約なので影響しない |
+| H4 | MIDI Program Change 送信 | **既存** `hostapi_seq_write(port=DIN_OUT)`（境界前の予約）/ `hostapi_midi_send`（再生開始前の即時） | `transport_start` がキューを空にするので、開始時の PC は `midi_send` で先に送る |
+| H5 | MIDI Start / Stop 送信 | **既存** `hostapi_transport_start` / `stop` | `hostapi_midi_send` で 0xFA / 0xFC を送ってはいけない（二重送出） |
+| H6 | メトロノーム click ON/OFF、アクセント | **既存** `hostapi_seq_write(port=CLICK, OP_TONE)` + `hostapi_tone_define` | OFF は書かないだけ。アクセントは別スロット |
 | H7 | Bank の永続化（read / write） | 新規 | v1 後続 Phase |
+| H8 | テンポ / 拍子マップのリセット（再生開始時）と、長時間再生で枯渇しないこと | **新規** `[Phase 16 で追加]` | Phase 17。方式案は results |
+| H9 | 小節境界ちょうどでの停止 | **新規（推奨）** `[Phase 16 で追加]` | Phase 17。回避策（`seq_write` で 0xFC を予約）はあるが推奨しない |
 
 Host API / ABI の変更は承認ゲートを通す（既定の運用）。
 
@@ -251,13 +282,13 @@ Host API / ABI の変更は承認ゲートを通す（既定の運用）。
 
 ## 7. 未決事項（Phase で確定）
 
-| # | 項目 | 確定 Phase |
-|---|---|---|
-| Q1 | SL MK3 の PC 反映タイミング → `PC_LEAD_TICKS` | 16 |
-| Q2 | SL MK3 の PC 受信チャンネル、Bank Select の要否 | 16 |
-| Q3 | 上限定数の確定（メモリ見積もり） | 16 |
-| Q4 | H1–H3 が既存 API で足りるか | 16（調査）/ 17（実装） |
-| Q5 | ジャンプ操作の UI（長押し / ボタン） | 18 |
-| Q6 | カウントインを v1 に含めるか | 18 |
-| Q7 | Song / Chapter 画面へのトグル横展開の仕様（掘り下げ先の操作が再生 Scope に効くか） | 20 以降 |
-| Q8 | MIDI Clock の 115–119bpm 検出問題（別件）をどの Phase の前に解決するか | Roadmap 参照 |
+| # | 項目 | 確定 Phase | 結果 |
+|---|---|---|---|
+| Q1 | SL MK3 の PC 反映タイミング → `PC_LEAD_TICKS` | 16 | **確定**: 0..=63 は即時、+64 でパターン末尾へキュー。Session 境界はキューモードで `PC_LEAD_TICKS = 24`（暫定） |
+| Q2 | SL MK3 の PC 受信チャンネル、Bank Select の要否 | 16 | **確定**: ch16、Bank Select 不要 |
+| Q3 | 上限定数の確定（メモリ見積もり） | 16 | **確定**: §3 の値のまま（Bank 9,842 B。linear memory は PSRAM 上で問題にならない） |
+| Q4 | H1–H3 が既存 API で足りるか | 16（調査）/ 17（実装） | **調査済み**: H1–H6 は既存で足りる。H8（マップのリセット / 枯渇対策）と H9（境界同期の停止）が新規 |
+| Q5 | ジャンプ操作の UI（長押し / ボタン） | 18 | |
+| Q6 | カウントインを v1 に含めるか | 18 | |
+| Q7 | Song / Chapter 画面へのトグル横展開の仕様（掘り下げ先の操作が再生 Scope に効くか） | 20 以降 | |
+| Q8 | MIDI Clock の 115–119bpm 検出問題（別件）をどの Phase の前に解決するか | Roadmap 参照 | **クローズ**（2026-09-13。Phase 9c〜14 で解決済み、再発なし。roadmap U-1） |

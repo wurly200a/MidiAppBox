@@ -166,6 +166,22 @@ herdr 運用・ビルド手順そのものの教訓は `docs/workflow.md` に一
   実績がある。**復旧確認は必ずビルド成果物側**(`build/config/sdkconfig.h` の
   `#define` 行)で行うこと(15 ステップ4)。
 
+## Sequencer コア(Phase 16)
+- **`Option<T>` の None は全ビット 0 とは限らない。** T の中に niche(`Option<TimeSig>` のタグの
+  未使用値など)があると、外側の `Option` はそれを使って None を表す。`[Option<Session>; 64]` を
+  持つ Bank の `new()` は 64 バイトが非ゼロになった。初期値に 1 バイトでも非ゼロがある `static` は、
+  その全体が .bss ではなく **.data として `.wasm` に載る**(Bank なら約 9.8KB。`.wasm` の 16KB 閾値
+  = Strategy B に触れる)。**static に置く型は「初期値が全ビット 0」をテストで固定する**
+  (`seqcore` の `empty_bank_is_all_zero_bits`)(16)。
+- **wasm32 と x86_64 では `usize` の幅が違う**(4 / 8 バイト)。長さを `usize` で持つコンテナは
+  ホストのテストで `size_of` を取っても実機の値にならない。長さを `u8` 等の固定幅で持てば一致し、
+  メモリ見積もりをホストの `cargo test` で取れる(16)。
+- **SL MK3 の Session 切替は ch16 の Program Change。** 0..=63 は即時、**+64 で再生中パターンの
+  末尾へキュー**。境界ちょうどに合わせる必要があるのは即時モードのほうで、キューモードなら
+  送信側の精度は要らない(境界より前、最後のパターン周回中に届けばよい)(16)。
+- **`transport_start` は L0 のキューを空にする。** 再生開始と同時に効かせたい MIDI(開始時の PC 等)を
+  `seq_write` で start の前に積んでも消える。`hostapi_midi_send` で start の前に送る(16)。
+
 ## ホスト共通(Phase 11 で得たもの)
 - 実機と Linux ホストで**同じロジックを二重に書かない**。L0/L1 は
   `shared/seq_core.c`(OS API を呼ばない移植可能な C)に置き、時刻源・排他・
