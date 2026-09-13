@@ -77,6 +77,15 @@ target_include_directories(midibox_host PRIVATE
 )
 target_link_libraries(midibox_host PRIVATE vmlib SDL2::SDL2)
 
+# ---- shared/seq_core.c の単体テスト(Phase 17)----
+# 偽の時計でディスパッチを決定的に進める。SDL / WAMR / ALSA には依存しない。
+# 実行: ctest --test-dir build --output-on-failure
+enable_testing()
+add_executable(seq_core_test tests/seq_core_test.c
+               ${CMAKE_CURRENT_SOURCE_DIR}/../../shared/seq_core.c)
+target_include_directories(seq_core_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../shared)
+add_test(NAME seq_core_test COMMAND seq_core_test)
+
 if(ALSA_FOUND)
     target_compile_definitions(midibox_host PRIVATE HAVE_ALSA)
     target_include_directories(midibox_host PRIVATE ${ALSA_INCLUDE_DIRS})

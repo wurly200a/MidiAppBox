@@ -356,6 +356,10 @@ int32_t native_hostapi_tempomap_set_meter(wasm_exec_env_t e, int32_t at_tick,
 int32_t native_hostapi_tempomap_set_loop(wasm_exec_env_t e, int32_t start, int32_t end)
 { (void)e; return seqcore_tempomap_set_loop((uint32_t)start, (uint32_t)end); }
 
+// Phase 17
+int32_t native_hostapi_tempomap_clear(wasm_exec_env_t e)
+{ (void)e; return seqcore_tempomap_clear(); }
+
 int32_t native_hostapi_seq_write(wasm_exec_env_t e, const char* buf, uint32_t len)
 { (void)e; return seqcore_seq_write(buf, len); }
 

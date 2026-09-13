@@ -273,8 +273,8 @@ Session 画面は両ルートから **同じ画面** に到達する。
 | H5 | MIDI Start / Stop 送信 | **既存** `hostapi_transport_start` / `stop` | `hostapi_midi_send` で 0xFA / 0xFC を送ってはいけない（二重送出） |
 | H6 | メトロノーム click ON/OFF、アクセント | **既存** `hostapi_seq_write(port=CLICK, OP_TONE)` + `hostapi_tone_define` | OFF は書かないだけ。アクセントは別スロット |
 | H7 | Bank の永続化（read / write） | 新規 | v1 後続 Phase |
-| H8 | テンポ / 拍子マップのリセット（再生開始時）と、長時間再生で枯渇しないこと | **新規** `[Phase 16 で追加]` | Phase 17。方式案は results |
-| H9 | 小節境界ちょうどでの停止 | **新規（推奨）** `[Phase 16 で追加]` | Phase 17。回避策（`seq_write` で 0xFC を予約）はあるが推奨しない |
+| H8 | テンポ / 拍子マップのリセット（再生開始時）と、長時間再生で枯渇しないこと | **実装済み（Phase 17）** `hostapi_tempomap_clear()` + 満杯時の畳み込み | 再生を始め直すときは stop → clear → 初期値の設定 → start。仕様は `docs/hostapi.md` §4 |
+| H9 | 小節境界ちょうどでの停止 | **実装済み（Phase 17）** `seq_write` の `HOSTAPI_SEQ_OP_STOP` | その tick のクロックは出さない。仕様は `docs/hostapi.md` §5 |
 
 Host API / ABI の変更は承認ゲートを通す（既定の運用）。
 

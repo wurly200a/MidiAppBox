@@ -12,6 +12,13 @@
 //   stage 4: transport_stop → 0xFC
 //   stage 5: STOPPED 中の time_us_to_tick が -1
 //   stage 6: transport_continue → 0xFB、位置が停止点から継続
+//   --- Phase 17(docs/results/phase17.md)---
+//   stage 8 : STOPPED で tempomap_clear → 0・既定テンポ(PLAYING 中は -1 も stage 9 で確認)
+//   stage 9 : V1 — 2/8・3/8 とテンポ 2 値を 100 小節交互に予約(マップ上限 32 の 3 倍超)。
+//             set_* が一度も -1 にならず、bar / beat / upq が期待どおり
+//   stage 10: clear → 120bpm・4/4 で始め直し、3 小節目の頭(11520)に OP_STOP を予約
+//   stage 11: V2 — 前回の予約が混ざらない / V3 — 予約 tick ちょうどに STOPPED
+//   stage 12: 完了。CC#119 / #120 で 12 bit の判定を送る(全合格 = 4095)
 //   常時   : time_us_to_tick(get_position の host_us) ≒ get_position の tick
 //
 // time_us_to_tick の検証に get_position の host_us を使うのが要点で、これなら
@@ -41,6 +48,7 @@ extern "C" {
     fn hostapi_tempomap_set_tempo(at_tick: i32, us_per_quarter: i32) -> i32;
     fn hostapi_tempomap_set_meter(at_tick: i32, numer: i32, denom: i32) -> i32;
     fn hostapi_tempomap_set_loop(start_tick: i32, end_tick: i32) -> i32;
+    fn hostapi_tempomap_clear() -> i32; // Phase 17
     fn hostapi_seq_write(buf: *const u8, buf_len: u32) -> i32;
     fn hostapi_seq_flush_after(tick: i32) -> i32;
     fn hostapi_seq_filled_until() -> i32;
@@ -74,7 +82,29 @@ const CHK_U2T_STOPPED: u16 = 1 << 4;
 const CHK_CONT: u16 = 1 << 5;
 const CHK_U2T: u16 = 1 << 6;
 const CHK_FLUSH: u16 = 1 << 7;
-const CHK_ALL: u16 = 0xFF;
+// Phase 17
+const CHK_CLEAR: u16 = 1 << 8; // tempomap_clear: STOPPED で 0 と既定値、PLAYING で -1
+const CHK_NOEXHAUST: u16 = 1 << 9; // 上限 32 件の 3 倍を超える変化で -1 にならず位置が正しい
+const CHK_RESTART: u16 = 1 << 10; // clear 後の再生に前回の予約が混ざらない
+const CHK_STOPAT: u16 = 1 << 11; // OP_STOP で予約 tick ちょうどに止まる
+const CHK_ALL: u16 = 0x0FFF;
+
+const OP_STOP: u8 = 2;
+const TRANSPORT_STOPPED: u32 = 0;
+
+// stage 9(V1): 2/8 と 3/8、テンポ 150000 / 160000 µs を小節ごとに交互に予約する
+const V1_BARS: u32 = 100;
+const V1_SHORT: u32 = 960; // 2/8 の小節長
+const V1_PAIR: u32 = 2400; // 2/8 + 3/8
+const V1_BEAT: u32 = 480; // 8 分音符
+const V1_TEMPO_EVEN: i32 = 150000;
+const V1_TEMPO_ODD: i32 = 160000;
+const V1_LOOKAHEAD: u32 = V1_PAIR * 2; // app_tick(100ms)より十分先まで予約する
+// 位置の照合は小節境界から離れたところだけで行う(境界の直後はディスパッチャが
+// 区間を進める前に位置を読むことがあり、テンポがまだ旧値のことがあるため)
+const EDGE_MARGIN: u32 = 96;
+// stage 11(V3): 3 小節目の頭で止める
+const STOP_AT: u32 = BAR * 3;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -125,6 +155,14 @@ static mut PB_MARK: u32 = 0;
 static mut SONG_AT_STOP: u32 = 0;
 static mut PB_AT_STOP: u32 = 0;
 static mut LAST_HOST_US: u64 = 0;
+
+// Phase 17 のステージ(8〜11)の状態
+static mut CLEAR_STOPPED_OK: bool = false;
+static mut V1_FIRST: bool = false;
+static mut V1_WRITTEN: u32 = 0; // 予約済みの最後の小節番号
+static mut CHECK_FAIL: bool = false;
+static mut SAMPLES: u32 = 0; // 照合した回数
+static mut STOP_WRITTEN: bool = false;
 
 // 自機 MIDI OUT → MIDI IN のループバック受信(実機での送出確認。任意)
 static mut RX_CLOCK: u32 = 0;
@@ -301,11 +339,57 @@ fn supply(now_tick: u32) {
     }
 }
 
+// ---- Phase 17 のステージの補助 ----
+
+/// stage 9(V1)の小節 k の開始 song tick(2/8 と 3/8 の交互)
+fn v1_bar_start(k: u32) -> u32 {
+    (k / 2) * V1_PAIR + (k % 2) * V1_SHORT
+}
+
+/// song tick が属する stage 9 の小節番号
+fn v1_bar_of(song: u32) -> u32 {
+    2 * (song / V1_PAIR) + if song % V1_PAIR >= V1_SHORT { 1 } else { 0 }
+}
+
+/// 小節 k のテンポと拍子を予約する。どちらかが -1 なら false
+fn v1_set_bar(k: u32) -> bool {
+    let at = v1_bar_start(k) as i32;
+    let (tempo, numer) = if k % 2 == 0 { (V1_TEMPO_EVEN, 2) } else { (V1_TEMPO_ODD, 3) };
+    unsafe {
+        hostapi_tempomap_set_tempo(at, tempo) == 0 && hostapi_tempomap_set_meter(at, numer, 8) == 0
+    }
+}
+
+/// 次の検査のために transport を頭から始め直す(供給もやり直す)
+fn restart_transport() -> bool {
+    drop_pending();
+    unsafe {
+        NEXT_BEAT = 0;
+        hostapi_transport_start() == 0
+    }
+}
+
+/// 全ステージ終了。判定結果を CC で外へ出す(データバイトは 7bit なので
+/// 下位 7 bit と上位 7 bit を 2 本に分ける)。画面を読めない Linux ホストでは
+/// これが合否の確認手段になる。
+fn finish() {
+    unsafe {
+        RUNNING = false;
+        drop_pending();
+        STAGE = 12;
+        let lo = [0xB0u8, 0x77, (CHK & 0x7F) as u8];
+        hostapi_midi_send(lo.as_ptr(), 3);
+        let hi = [0xB0u8, 0x78, ((CHK >> 7) & 0x7F) as u8];
+        hostapi_midi_send(hi.as_ptr(), 3);
+    }
+    draw_button();
+}
+
 fn draw_button() {
     unsafe {
         let (label, color): (&[u8], u32) = if RUNNING {
             (b"RUNNING", 0xa0_30_30)
-        } else if STAGE >= 7 {
+        } else if STAGE >= 12 {
             (b"DONE   ", 0x20_80_40)
         } else {
             (b"IDLE   ", 0x20_40_a0)
@@ -315,31 +399,22 @@ fn draw_button() {
     }
 }
 
-/// 判定結果(8 項目)を o / - で表示する
+/// 判定結果(12 項目)を o / - で表示する
 fn draw_checks() {
     unsafe {
-        let row1: [(&[u8], u16); 4] = [
-            (b"tmp", CHK_TEMPO),
-            (b"lop", CHK_LOOP),
-            (b"loc", CHK_LOCATE),
-            (b"stp", CHK_STOP),
+        let rows: [[(&[u8], u16); 4]; 3] = [
+            [(b"tmp", CHK_TEMPO), (b"lop", CHK_LOOP), (b"loc", CHK_LOCATE), (b"stp", CHK_STOP)],
+            [(b"u2s", CHK_U2T_STOPPED), (b"con", CHK_CONT), (b"u2t", CHK_U2T), (b"flu", CHK_FLUSH)],
+            // Phase 17
+            [(b"clr", CHK_CLEAR), (b"exh", CHK_NOEXHAUST), (b"rst", CHK_RESTART), (b"sta", CHK_STOPAT)],
         ];
-        let row2: [(&[u8], u16); 4] = [
-            (b"u2s", CHK_U2T_STOPPED),
-            (b"con", CHK_CONT),
-            (b"u2t", CHK_U2T),
-            (b"flu", CHK_FLUSH),
-        ];
-        let mut l = Line::new();
-        for (n, bit) in row1.iter() {
-            l.push(n).push(if CHK & bit != 0 { b"=o " } else { b"=- " });
+        for (r, row) in rows.iter().enumerate() {
+            let mut l = Line::new();
+            for (n, bit) in row.iter() {
+                l.push(n).push(if CHK & bit != 0 { b"=o " } else { b"=- " });
+            }
+            l.draw(12, 96 + 16 * r as i32);
         }
-        l.draw(12, 104);
-        let mut l2 = Line::new();
-        for (n, bit) in row2.iter() {
-            l2.push(n).push(if CHK & bit != 0 { b"=o " } else { b"=- " });
-        }
-        l2.draw(12, 124);
         let mut l3 = Line::new();
         l3.push(if CHK == CHK_ALL { b"PASS chk " } else { b"---- chk " })
           .push_u32(CHK as u32).push(b" st").push_u32(STAGE as u32);
@@ -362,6 +437,9 @@ fn draw_rx() {
 
 fn start() {
     unsafe {
+        // 再実行に備えて時間軸を空にする(前回の stage 9 で畳み込みが起きていると、
+        // clear しない限り at_tick=0 へは書けない。Phase 17)
+        hostapi_tempomap_clear();
         hostapi_tempomap_set_tempo(0, TEMPO_120);
         hostapi_tempomap_set_meter(0, 4, 4);
         hostapi_tempomap_set_loop(0, 0); // ループ解除から始める
@@ -469,7 +547,8 @@ fn advance_playing(now_tick: u32, song: u32, upq: u32) {
                     }
                 }
             }
-            // continue 後: 停止点から継続していること。2 小節走らせて終了
+            // continue 後: 停止点から継続していること。2 小節走らせて止め、
+            // Phase 17 のステージ(STOPPED 中の stage 8)へ進む
             6 => {
                 if now_tick >= PB_AT_STOP && song >= SONG_AT_STOP {
                     CHK |= CHK_CONT;
@@ -478,15 +557,127 @@ fn advance_playing(now_tick: u32, song: u32, upq: u32) {
                     hostapi_transport_stop();
                     RUNNING = false;
                     resync_after_discard();
-                    STAGE = 7;
-                    // 判定結果を CC で外へ出す(データバイトは 7bit なので
-                    // 下位 7 個と 8 個目を 2 本に分ける)。画面を読めない
-                    // Linux ホストではこれが合否の確認手段になる。
-                    let lo = [0xB0u8, 0x77, (CHK & 0x7F) as u8];
-                    hostapi_midi_send(lo.as_ptr(), 3);
-                    let hi = [0xB0u8, 0x78, ((CHK >> 7) & 0x7F) as u8];
-                    hostapi_midi_send(hi.as_ptr(), 3);
+                    STAGE = 8;
                     draw_button();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Phase 17 のステージのうち STOPPED 中に進めるもの(stage 8 / 10)
+fn advance_stopped_phase17() {
+    unsafe {
+        match STAGE {
+            // stage 8: tempomap_clear(STOPPED で 0・既定値に戻る)→ V1 を始める
+            8 => {
+                CLEAR_STOPPED_OK = false;
+                if hostapi_tempomap_clear() == 0 {
+                    let mut pos = [0u8; 32];
+                    if hostapi_transport_get_position(pos.as_mut_ptr(), 32) == 0 {
+                        let upq = u32::from_le_bytes([pos[20], pos[21], pos[22], pos[23]]);
+                        CLEAR_STOPPED_OK = upq == TEMPO_120 as u32;
+                    }
+                }
+                V1_WRITTEN = 0;
+                SAMPLES = 0;
+                CHECK_FAIL = !v1_set_bar(0);
+                V1_FIRST = true;
+                if restart_transport() {
+                    RUNNING = true;
+                    STAGE = 9;
+                    draw_button();
+                }
+            }
+            // stage 10: clear → 120bpm・4/4 で始め直し、3 小節目の頭に OP_STOP を予約する。
+            // V1 で畳み込みが起きているので、clear が効いていなければ at_tick=0 へは書けない
+            10 => {
+                SAMPLES = 0;
+                CHECK_FAIL = !(hostapi_tempomap_clear() == 0
+                    && hostapi_tempomap_set_tempo(0, TEMPO_120) == 0
+                    && hostapi_tempomap_set_meter(0, 4, 4) == 0);
+                if restart_transport() {
+                    // transport_start はキューを空にするので、OP_STOP は start の後に積む
+                    let mut stop = SeqEvent::zero();
+                    stop.tick = STOP_AT;
+                    stop.status = OP_STOP;
+                    STOP_WRITTEN =
+                        hostapi_seq_write(&stop as *const SeqEvent as *const u8, 16) == 1;
+                    RUNNING = true;
+                    STAGE = 11;
+                    draw_button();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Phase 17 のステージのうち PLAYING 中に進めるもの(stage 9 / 11)
+fn advance_playing_phase17(now_tick: u32, song: u32, bar: u32, beat: u32, upq: u32, state: u32) {
+    unsafe {
+        match STAGE {
+            // stage 9(V1): 上限 32 件の 3 倍を超える変化を通過させる
+            9 => {
+                if V1_FIRST {
+                    V1_FIRST = false;
+                    // PLAYING 中の clear は -1
+                    if CLEAR_STOPPED_OK && hostapi_tempomap_clear() == -1 {
+                        CHK |= CHK_CLEAR;
+                    }
+                }
+                while V1_WRITTEN < V1_BARS && v1_bar_start(V1_WRITTEN + 1) <= song + V1_LOOKAHEAD {
+                    V1_WRITTEN += 1;
+                    if !v1_set_bar(V1_WRITTEN) {
+                        CHECK_FAIL = true;
+                    }
+                }
+                let k = v1_bar_of(song);
+                let off = song - v1_bar_start(k);
+                let len = if k % 2 == 0 { V1_SHORT } else { V1_PAIR - V1_SHORT };
+                if k < V1_BARS && off >= EDGE_MARGIN && off + EDGE_MARGIN <= len {
+                    let tempo = (if k % 2 == 0 { V1_TEMPO_EVEN } else { V1_TEMPO_ODD }) as u32;
+                    if bar != k || beat != off / V1_BEAT || upq != tempo {
+                        CHECK_FAIL = true;
+                    }
+                    SAMPLES += 1;
+                }
+                if song >= v1_bar_start(V1_BARS) {
+                    if !CHECK_FAIL && SAMPLES >= 50 {
+                        CHK |= CHK_NOEXHAUST;
+                    }
+                    hostapi_transport_stop();
+                    RUNNING = false;
+                    resync_after_discard();
+                    STAGE = 10;
+                    draw_button();
+                }
+            }
+            // stage 11(V2 + V3): 前回の予約が混ざらないこと、OP_STOP で止まること
+            11 => {
+                if state == TRANSPORT_STOPPED {
+                    if STOP_WRITTEN && song == STOP_AT && now_tick == STOP_AT {
+                        CHK |= CHK_STOPAT;
+                    }
+                    if !CHECK_FAIL && SAMPLES >= 10 {
+                        CHK |= CHK_RESTART;
+                    }
+                    finish();
+                    return;
+                }
+                if song < STOP_AT {
+                    let off = song % BAR;
+                    if off >= EDGE_MARGIN && off + EDGE_MARGIN <= BAR {
+                        if bar != song / BAR || beat != off / BEAT || upq != TEMPO_120 as u32 {
+                            CHECK_FAIL = true;
+                        }
+                        SAMPLES += 1;
+                    }
+                }
+                if now_tick > STOP_AT + BAR * 2 {
+                    hostapi_transport_stop(); // OP_STOP が効かなかった
+                    finish();
                 }
             }
             _ => {}
@@ -525,6 +716,7 @@ pub extern "C" fn app_tick() {
     let bar = u32::from_le_bytes([pos[16], pos[17], pos[18], pos[19]]);
     let upq = u32::from_le_bytes([pos[20], pos[21], pos[22], pos[23]]);
     let beat = u16::from_le_bytes([pos[24], pos[25]]);
+    let state = u32::from_le_bytes([pos[28], pos[29], pos[30], pos[31]]);
 
     unsafe {
         LAST_HOST_US = host_us;
@@ -541,6 +733,8 @@ pub extern "C" fn app_tick() {
                     STAGE = 6;
                     draw_button();
                 }
+            } else {
+                advance_stopped_phase17(); // stage 8 / 10
             }
             draw_checks();
             draw_rx();
@@ -559,6 +753,7 @@ pub extern "C" fn app_tick() {
         }
 
         advance_playing(now_tick, song, upq);
+        advance_playing_phase17(now_tick, song, bar, beat as u32, upq, state); // stage 9 / 11
         supply(now_tick);
 
         let mut l = Line::new();

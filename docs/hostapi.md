@@ -19,7 +19,7 @@
 本文書の §6「アプリ要件突き合わせ表」が、その検証結果である。
 5 要件すべてを、下記 12 関数だけで実現できることを確認した。
 
-## 1. 追加する語彙(全 12 関数)
+## 1. 追加する語彙(全 13 関数。Phase 11 の 12 関数 + Phase 17 の `tempomap_clear`)
 
 既存 API と同じ規約に従う: エラーは負数(通常 -1)、アプリの不正入力でトラップさせない。
 out-buffer は (ptr, len) を渡してホストが書いた件数/長さを返す。
@@ -35,6 +35,7 @@ out-buffer は (ptr, len) を渡してホストが書いた件数/長さを返�
 | tempomap | `hostapi_tempomap_set_tempo(at_tick, us_per_quarter)` | `(ii)i` |
 | | `hostapi_tempomap_set_meter(at_tick, numer, denom)` | `(iii)i` |
 | | `hostapi_tempomap_set_loop(start_tick, end_tick)` | `(ii)i` |
+| | `hostapi_tempomap_clear()`(Phase 17) | `()i` |
 | seq | `hostapi_seq_write(buf_ptr, buf_len)` | `(*~)i` |
 | | `hostapi_seq_flush_after(tick)` | `(i)i` |
 | | `hostapi_seq_filled_until()` | `()i` |
@@ -137,6 +138,32 @@ hostapi_tempomap_set_loop(start_song_tick, end_song_tick) -> 0/-1
   (playback tick は単調増加のまま。§2 参照)。
   - start >= end なら -1。
   - start == end == 0 でループ解除。
+
+hostapi_tempomap_clear() -> 0/-1   (Phase 17)
+  テンポマップ・拍子マップを空にし、ループを解除する。アプリ起動直後と同じ
+  時間軸になる(有効値は既定の 500000 = 120bpm、4/4)。
+  - STOPPED 中のみ。PLAYING 中は何もせず -1(再生中に消すと現在のテンポが
+    既定値へ飛ぶため)。
+  - transport の位置とキューには触らない。
+  - transport_start はマップを消さない(STOPPED 中に at_tick=0 で初期値を
+    設定してから start する契約のため)。**同じアプリで再生を始め直すときは
+    stop → clear → 初期値の設定 → start** とすること。clear しないと、
+    前回の再生で未来の tick に書いたエントリが次の再生で効く。
+
+満杯時の畳み込み(Phase 17。set_tempo / set_meter 共通)
+  PLAYING 中にマップが満杯で新しい at_tick を足せないとき、ホストは通過済みの
+  区間を「最後の 1 件」に畳んでから挿入する(従来はここで -1 だった)。
+  - 畳む対象は floor より前のエントリ。floor は現在の song tick(テンポは
+    さらに現在のテンポ区間の開始を超えない)。ループ設定中は loop start を超えない。
+  - 残した 1 件がその区間の有効値を保つので、floor 以降のテンポ・拍子・
+    小節番号(get_position の bar / beat)は畳む前と同じ。
+  - 畳んだ後は、残した先頭エントリより前の at_tick へは書けない(-1)。
+    その区間の bar / beat と、そこへ locate / continue したときのテンポ・拍子は
+    保証しない。clear で元に戻る。
+  - STOPPED 中は畳まない(次の start は song tick 0 から始まるため)。
+  - set_meter は、挿入位置が floor より前なら畳まずに -1。
+  - 満杯にならない限り挙動は変わらない(既存アプリへの影響なし)。
+  - 判断の記録は docs/architecture.md §11-10。
 ```
 
 ## 5. seq
@@ -183,6 +210,22 @@ hostapi_seq_filled_until() -> tick
   キューに積まれている最後のイベントの playback tick を返す。
   キューが空なら現在の playback tick を返す(L2 が「ここから書けばよい」と
   解釈できる値にする)。STOPPED 中は 0 か locate 済み位置。
+
+HOSTAPI_SEQ_OP_STOP(seq_write の status に指定する。Phase 17)
+  { tick: T, port: 任意(無視される。0 推奨), status: HOSTAPI_SEQ_OP_STOP }
+  playback tick T で transport を停止する。停止後の状態は transport_stop と同じ形。
+  - T のクロックは出さない(T が 40 tick グリッド上なら、それは次の小節の
+    1 発目になるため)。T より前のクロックはすべて出る。
+  - T より前のイベントは送出する。T と同じ tick で OP_STOP より先に書かれた
+    イベント(境界の note-off 等)も送出し、その後に 0xFC を送る。
+    後に書かれたものと T より後のイベントは破棄する。
+  - 停止後の位置: song tick = T に対応する song 位置、playback tick = T。
+    continue はそこから再開する(T のクロックは continue の直後に出る)。
+    遅れて発火した場合(T が現在より過去)は、playback tick を最後に出した
+    クロックより後へ切り上げて単調性を保つ。song tick は T の位置のまま。
+  - 普通のキューイベントなので、seq_flush_after(t <= T) / transport_locate /
+    transport_stop で取り消せる。アプリは get_position の state で停止を知る。
+  - 判断の記録は docs/architecture.md §11-10。
 ```
 
 ### 実装メモ(承認後の Phase 11 向け)

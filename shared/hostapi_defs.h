@@ -232,6 +232,13 @@ enum {
  * キューの未発火イベント破棄で発音中ノートが鳴りっぱなしになる場合、
  * All Notes Off はホストが自動送出しない(アプリが hostapi_midi_send で送る。
  * architecture.md §11-8)。
+ *
+ * テンポ / 拍子マップの寿命(Phase 17、architecture.md §11-10):
+ *   transport_start はマップを消さない。同じアプリで再生を始め直すときは
+ *   stop → hostapi_tempomap_clear() → at_tick=0 の初期値設定 → start とする。
+ *   PLAYING 中にマップが満杯になると、ホストは通過済みの区間を 1 件に畳んでから
+ *   挿入する(畳んだ後は、残した先頭エントリより前の at_tick へは書けない)。
+ *   小節境界で止めるには seq_write で HOSTAPI_SEQ_OP_STOP を予約する。
  */
 
 #define HOSTAPI_PPQN 960
@@ -254,6 +261,11 @@ enum {
 enum {
     HOSTAPI_SEQ_OP_NONE = 0,
     HOSTAPI_SEQ_OP_TONE = 1, /* port=CLICK。param = トーンスロット (0..7) */
+    /* tick で transport を停止する(Phase 17)。port は無視。その tick のクロックは
+     * 出さない。同じ tick で先に書かれたイベントは送出し、後に書かれたものと
+     * それ以降の tick のイベントは破棄する。続けて 0xFC を送出する。
+     * 普通のキューイベントなので seq_flush_after / locate / stop で取り消せる */
+    HOSTAPI_SEQ_OP_STOP = 2,
     /* 将来: OP_MARKER, OP_CALLBACK, ... 追加は非破壊 */
 };
 
@@ -321,6 +333,7 @@ enum {
     X(hostapi_tempomap_set_tempo, "(ii)i")                  \
     X(hostapi_tempomap_set_meter, "(iii)i")                 \
     X(hostapi_tempomap_set_loop, "(ii)i")                   \
+    X(hostapi_tempomap_clear, "()i")      /* Phase 17 */    \
     X(hostapi_seq_write, "(*~)i")                           \
     X(hostapi_seq_flush_after, "(i)i")                      \
     X(hostapi_seq_filled_until, "()i")                      \

@@ -79,11 +79,19 @@ int32_t seqcore_transport_locate(uint32_t song_tick);
 int32_t seqcore_transport_get_position(void* buf, size_t buf_len);
 
 /* ---- L1: tempomap(同 §4)---- */
+/* set_tempo / set_meter は、PLAYING 中にマップが満杯で新しい at_tick を足せないとき、
+ * 通過済みの区間を「最後の 1 件」に畳んでから挿入する。畳んだ後は、残した先頭
+ * エントリより前の at_tick へは書けない(-1)。Phase 17、architecture.md §11-10 */
 int32_t seqcore_tempomap_set_tempo(uint32_t at_song_tick, uint32_t us_per_quarter);
 int32_t seqcore_tempomap_set_meter(uint32_t at_song_tick, uint32_t numer, uint32_t denom);
 int32_t seqcore_tempomap_set_loop(uint32_t start_song_tick, uint32_t end_song_tick);
+/* テンポ / 拍子マップとループを空にする(畳み込みの起点も戻す)。
+ * STOPPED 中のみ。PLAYING 中は何もせず -1。Phase 17 */
+int32_t seqcore_tempomap_clear(void);
 
 /* ---- L0: seq(同 §5)---- */
+/* status == HOSTAPI_SEQ_OP_STOP のイベントは、その playback tick で transport を
+ * 停止する(port は無視。その tick のクロックは出さない)。Phase 17 */
 /* 先頭から連続した n 件(プレフィックス)のみを受理する。残りはアプリが
  * 保持して再送する契約(architecture.md §11-9)*/
 int32_t seqcore_seq_write(const void* buf, size_t buf_len);

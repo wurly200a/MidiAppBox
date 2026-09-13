@@ -130,13 +130,28 @@ static uint32_t next_deadline_locked(bool* has)
     return next;
 }
 
+/* 拍子マップの小節番号の起点(Phase 17)。通常は tick 0 = 小節 0。
+ * 満杯時の畳み込みで先頭側のエントリを消したとき、残した先頭エントリの位置と
+ * そこでの小節番号をここへ移す(消した区間の小節数を失わないため)*/
+static uint32_t s_meter_origin_tick;
+static uint32_t s_meter_origin_bar;
+/* テンポマップの起点。畳み込み後はこれより前の at_tick へ書けない */
+static uint32_t s_tempo_origin_tick;
+
 static void bar_beat_locked(uint32_t song_tick, uint32_t* bar, uint16_t* beat,
                             uint16_t* tick_in_beat)
 {
-    uint32_t bars = 0;
-    uint32_t cur = 0;
+    uint32_t bars = s_meter_origin_bar;
+    uint32_t cur = s_meter_origin_tick;
     uint16_t numer = 4, denom = 4;
     int i = 0;
+    if (song_tick < cur) {
+        /* 畳み込んだ区間より前。値は保証しない(docs/hostapi.md §4)*/
+        *bar = bars;
+        *beat = 0;
+        *tick_in_beat = 0;
+        return;
+    }
     for (;;) {
         while (i < s_meter_n && s_meter[i].at_tick <= cur) {
             numer = s_meter[i].numer;
@@ -160,6 +175,61 @@ static void bar_beat_locked(uint32_t song_tick, uint32_t* bar, uint16_t* beat,
         bars += (span + bar_ticks - 1) / bar_ticks;
         cur = span_end;
     }
+}
+
+/* ---- 満杯時の畳み込み(Phase 17、docs/architecture.md §11-10)----
+ * PLAYING 中にマップが満杯で新しいエントリを足せないときだけ呼ぶ。
+ * floor より前のエントリを「最後の 1 件」だけ残して詰め、詰めた件数を返す。
+ * 残した 1 件がその区間の有効値を保つので、floor 以降の値は変わらない。
+ * 満杯にならない限り呼ばれないので、既存の成功経路の挙動は変わらない。 */
+
+static uint32_t cur_song_locked(void)
+{
+    return s_seg_song + (cur_pb_locked(now_us()) - s_seg_tick);
+}
+
+/* ループで戻る区間は消さない */
+static uint32_t loop_floor_locked(uint32_t floor)
+{
+    if (s_loop_end > s_loop_start && s_loop_start < floor) return s_loop_start;
+    return floor;
+}
+
+static int compact_tempo_locked(void)
+{
+    /* 現在のテンポ区間の開始より前だけを対象にする(ディスパッチャが区間境界を
+     * まだ処理していない間に、その境界のエントリを消さないため)*/
+    uint32_t floor = cur_song_locked();
+    if (s_seg_song < floor) floor = s_seg_song;
+    floor = loop_floor_locked(floor);
+
+    int last = -1;
+    for (int i = 0; i < s_tempo_n && s_tempo[i].at_tick < floor; ++i) last = i;
+    if (last <= 0) return 0;
+    memmove(&s_tempo[0], &s_tempo[last], (size_t)(s_tempo_n - last) * sizeof(TempoEntry));
+    s_tempo_n -= last;
+    s_tempo_origin_tick = s_tempo[0].at_tick;
+    return last;
+}
+
+static int compact_meter_locked(void)
+{
+    const uint32_t floor = loop_floor_locked(cur_song_locked());
+
+    int last = -1;
+    for (int i = 0; i < s_meter_n && s_meter[i].at_tick < floor; ++i) last = i;
+    if (last <= 0) return 0;
+    {
+        uint32_t bar;
+        uint16_t beat, tib;
+        bar_beat_locked(s_meter[last].at_tick, &bar, &beat, &tib);
+        /* 変更点が小節の途中なら新しい小節が始まる(bar_beat_locked と同じ規則)*/
+        s_meter_origin_bar = bar + ((beat != 0 || tib != 0) ? 1u : 0u);
+        s_meter_origin_tick = s_meter[last].at_tick;
+    }
+    memmove(&s_meter[0], &s_meter[last], (size_t)(s_meter_n - last) * sizeof(MeterEntry));
+    s_meter_n -= last;
+    return last;
 }
 
 /* ---- ポート層(§7)。必ずロックの外から呼ぶ ---- */
@@ -244,6 +314,9 @@ static void reset_state_locked(void)
     s_count = 0;
     s_tempo_n = 0;
     s_meter_n = 0;
+    s_tempo_origin_tick = 0;
+    s_meter_origin_tick = 0;
+    s_meter_origin_bar = 0;
     s_state = HOSTAPI_TRANSPORT_STOPPED;
     s_seg_tick = 0;
     s_seg_song = 0;
@@ -300,11 +373,21 @@ void seqcore_dispatch(void)
             return;
         }
         if (next == s_seg_end_pb) seg_advance_locked();
-        if (next == s_next_clock_pb) {
+
+        /* 期限の来た OP_STOP(Phase 17、architecture.md §11-10)。
+         * キューは tick 昇順・同 tick は書き込み順なので、先頭から最初の 1 件を探す */
+        int stop_k = -1;
+        for (int k = 0; k < s_count && s_queue[k].tick <= next; ++k) {
+            if (s_queue[k].status == HOSTAPI_SEQ_OP_STOP) { stop_k = k; break; }
+        }
+        /* 停止 tick のクロックは出さない(グリッド上なら次の小節の 1 発目になるため)*/
+        if (next == s_next_clock_pb && stop_k < 0) {
             emit_clock = true;
             s_next_clock_pb += SEQCORE_CLOCK_GRID_TICKS;
         }
-        while (s_count > 0 && s_queue[0].tick <= next && nemit < EMIT_MAX) {
+        /* OP_STOP より前(同 tick で先に書かれたものを含む)だけを取り出す */
+        while (s_count > 0 && s_queue[0].tick <= next && nemit < EMIT_MAX &&
+               (stop_k < 0 || nemit < stop_k)) {
             emit[nemit++] = s_queue[0];
             if (s_count > 1) {
                 memmove(&s_queue[0], &s_queue[1],
@@ -312,11 +395,35 @@ void seqcore_dispatch(void)
             }
             s_count--;
         }
+        bool stopped = false;
+        if (stop_k >= 0 && nemit == stop_k) {
+            /* 先行イベントを取り出し終えた。状態遷移はロックの中で行う */
+            const uint32_t t = s_queue[0].tick;
+            uint32_t pb = t;
+            if (s_next_clock_pb >= SEQCORE_CLOCK_GRID_TICKS) {
+                /* 遅れて発火した場合も、既に出したクロックより前には戻さない
+                 * (continue は pb を切り上げたグリッドからクロックを再開する)*/
+                const uint32_t after_last_clock =
+                    s_next_clock_pb - SEQCORE_CLOCK_GRID_TICKS + 1u;
+                if (pb < after_last_clock) pb = after_last_clock;
+            }
+            s_pb_at_stop = pb;
+            s_song_at_stop = (t >= s_seg_tick) ? s_seg_song + (t - s_seg_tick) : s_seg_song;
+            s_state = HOSTAPI_TRANSPORT_STOPPED;
+            s_count = 0; /* OP_STOP 自身と、それ以降のイベントは破棄(transport_stop と同じ)*/
+            stopped = true;
+        }
         unlock();
 
         /* 送出はロックの外。リアルタイムバイトを最優先で出す(§7-4)*/
         if (emit_clock) port_send_realtime(0xF8);
         for (int i = 0; i < nemit; ++i) port_dispatch(&emit[i]);
+        if (stopped) {
+            /* 同 tick の先行イベントの後に Stop。再アームはしない(STOPPED なので
+             * 他スレッドの rearm もアームしない)*/
+            port_send_realtime(0xFC);
+            return;
+        }
     }
     /* 反復上限に達した。続きは次の起動で */
     timer_arm(0);
@@ -439,6 +546,8 @@ int32_t seqcore_tempomap_set_tempo(uint32_t at_song_tick, uint32_t us_per_quarte
     if (us_per_quarter < UPQ_MIN || us_per_quarter > UPQ_MAX) return -1;
 
     lock();
+    /* 畳み込み(Phase 17)で消した区間より前には書けない */
+    if (at_song_tick < s_tempo_origin_tick) { unlock(); return -1; }
     if (s_state == HOSTAPI_TRANSPORT_PLAYING) {
         const uint32_t cur_song = s_seg_song + (cur_pb_locked(now_us()) - s_seg_tick);
         if (at_song_tick < cur_song) { unlock(); return -1; }
@@ -450,7 +559,15 @@ int32_t seqcore_tempomap_set_tempo(uint32_t at_song_tick, uint32_t us_per_quarte
         if (i < s_tempo_n && s_tempo[i].at_tick == at_song_tick) {
             s_tempo[i].upq = us_per_quarter;
         } else {
-            if (s_tempo_n >= SEQCORE_TEMPO_MAX) { unlock(); return -1; }
+            if (s_tempo_n >= SEQCORE_TEMPO_MAX) {
+                /* 満杯。PLAYING 中なら通過済みの区間を畳む(Phase 17)。畳むのは
+                 * 現在の song tick 以前(<= at_song_tick)のエントリだけなので、
+                 * 挿入位置は消した件数だけ前へずれる */
+                const int removed =
+                    (s_state == HOSTAPI_TRANSPORT_PLAYING) ? compact_tempo_locked() : 0;
+                if (removed == 0) { unlock(); return -1; }
+                i -= removed;
+            }
             if (i < s_tempo_n) {
                 memmove(&s_tempo[i + 1], &s_tempo[i],
                         (size_t)(s_tempo_n - i) * sizeof(TempoEntry));
@@ -478,12 +595,31 @@ int32_t seqcore_tempomap_set_tempo(uint32_t at_song_tick, uint32_t us_per_quarte
     return 0;
 }
 
+/* テンポ / 拍子マップとループを空にする(Phase 17)。STOPPED 中のみ。
+ * PLAYING 中に消すと現在のテンポが既定値へ飛ぶので -1 */
+int32_t seqcore_tempomap_clear(void)
+{
+    lock();
+    if (s_state == HOSTAPI_TRANSPORT_PLAYING) { unlock(); return -1; }
+    s_tempo_n = 0;
+    s_meter_n = 0;
+    s_tempo_origin_tick = 0;
+    s_meter_origin_tick = 0;
+    s_meter_origin_bar = 0;
+    s_loop_start = 0;
+    s_loop_end = 0;
+    unlock();
+    return 0;
+}
+
 int32_t seqcore_tempomap_set_meter(uint32_t at_song_tick, uint32_t numer, uint32_t denom)
 {
     if (numer < 1 || numer > 32) return -1;
     if (denom != 1 && denom != 2 && denom != 4 && denom != 8 && denom != 16) return -1;
 
     lock();
+    /* 畳み込み(Phase 17)で消した区間より前には書けない */
+    if (at_song_tick < s_meter_origin_tick) { unlock(); return -1; }
     {
         int i = 0;
         while (i < s_meter_n && s_meter[i].at_tick < at_song_tick) ++i;
@@ -491,7 +627,20 @@ int32_t seqcore_tempomap_set_meter(uint32_t at_song_tick, uint32_t numer, uint32
             s_meter[i].numer = (uint16_t)numer;
             s_meter[i].denom = (uint16_t)denom;
         } else {
-            if (s_meter_n >= SEQCORE_METER_MAX) { unlock(); return -1; }
+            if (s_meter_n >= SEQCORE_METER_MAX) {
+                /* 満杯。PLAYING 中で、挿入位置が畳む区間(floor より前)に入らない
+                 * ときだけ畳む(Phase 17)。floor より前へ挿入すると、畳んだ後の
+                 * 小節番号の起点と矛盾するため。set_meter には過去 tick のガードが
+                 * 無い(metronome が PLAYING 中に at_tick=0 を上書きする)点に注意 */
+                int removed = 0;
+                if (s_state == HOSTAPI_TRANSPORT_PLAYING &&
+                    at_song_tick >= loop_floor_locked(cur_song_locked())) {
+                    removed = compact_meter_locked();
+                }
+                if (removed == 0) { unlock(); return -1; }
+                i = 0;
+                while (i < s_meter_n && s_meter[i].at_tick < at_song_tick) ++i;
+            }
             if (i < s_meter_n) {
                 memmove(&s_meter[i + 1], &s_meter[i],
                         (size_t)(s_meter_n - i) * sizeof(MeterEntry));
@@ -650,6 +799,22 @@ int seqcore_selftest(void)
     /* 5. 端数バイトは無視される */
     seqcore_reset();
     CHECK(seqcore_seq_write(bulk, sizeof(hostapi_seq_event_t) * 2 + 7) == 2);
+
+    /* 6. tempomap_clear(Phase 17): STOPPED で 0、マップとループが空になる */
+    seqcore_reset();
+    CHECK(seqcore_tempomap_set_tempo(960, 250000) == 0);
+    CHECK(seqcore_tempomap_set_meter(960, 3, 4) == 0);
+    CHECK(seqcore_tempomap_set_loop(0, 3840) == 0);
+    CHECK(seqcore_tempomap_clear() == 0);
+    CHECK(s_tempo_n == 0 && s_meter_n == 0 && s_loop_end == 0);
+
+    /* 7. OP_STOP(Phase 17)は普通のキューイベントとして積まれ、flush で消える */
+    seqcore_reset();
+    memset(evs, 0, sizeof(evs));
+    evs[0].tick = 3840;
+    evs[0].status = HOSTAPI_SEQ_OP_STOP;
+    CHECK(seqcore_seq_write(evs, sizeof(hostapi_seq_event_t)) == 1);
+    CHECK(seqcore_seq_flush_after(3840) == 1);
 
     seqcore_reset();
 #undef CHECK

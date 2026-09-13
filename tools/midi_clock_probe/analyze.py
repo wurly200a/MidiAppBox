@@ -268,6 +268,12 @@ def analyze(rows, bpm, t_from, t_to, label, segments, span_no=None):
     ratio = 100.0 * len(clocks) / expected_n if expected_n > 0 else 0.0
     out.append(f"| clocks / expected | **{ratio:.2f} %** |")
     out.append(f"| 0xFA / 0xFB / 0xFC | {len(ev['start'])} / {len(ev['continue'])} / {len(ev['stop'])} |")
+    # Phase 17: 境界停止の検証用。上の集計は区間外のクロックを捨てているので、
+    # 「Stop までちょうど N 発」「Stop の後は 0 発」を別に出す
+    per_span = [sum(1 for t in clocks if a <= t <= b) for (a, b) in spans]
+    stopped = [t for t in ev["clock"] if in_window(t) and span_of(t) is None]
+    out.append(f"| 再生区間ごとの 0xF8 数 | {' / '.join(str(n) for n in per_span) if per_span else '-'} |")
+    out.append(f"| 停止中(区間外)の 0xF8 数 | **{len(stopped)}** |")
     out.append(f"| 間隔 min / mean / max | {st['min']} / **{st['mean']:.1f}** / {st['max']} µs |")
     out.append(f"| 間隔 σ(受信側・参考) | {st['sd']:.1f} µs |")
     out.append(f"| 外れ値(≥1.5x / ≤0.5x) | **{len(outliers)} 件** |")

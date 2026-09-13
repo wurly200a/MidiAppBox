@@ -37,6 +37,7 @@ int32_t native_hostapi_tempomap_set_tempo(wasm_exec_env_t exec_env, int32_t at_t
 int32_t native_hostapi_tempomap_set_meter(wasm_exec_env_t exec_env, int32_t at_tick,
                                           int32_t numer, int32_t denom);
 int32_t native_hostapi_tempomap_set_loop(wasm_exec_env_t exec_env, int32_t start, int32_t end);
+int32_t native_hostapi_tempomap_clear(wasm_exec_env_t exec_env); /* Phase 17 */
 int32_t native_hostapi_seq_write(wasm_exec_env_t exec_env, const char* buf, uint32_t len);
 int32_t native_hostapi_seq_flush_after(wasm_exec_env_t exec_env, int32_t tick);
 int32_t native_hostapi_seq_filled_until(wasm_exec_env_t exec_env);

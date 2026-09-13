@@ -137,10 +137,80 @@ seq_smoke に追加するステージ:
 ---
 
 ## 決定した API と意味論
+
+ステップ 0 の方式 B' のとおり(仕様は `docs/hostapi.md` §4 / §5、決定記録は `docs/architecture.md` §11-10)。
+
+| 追加 / 変更 | 内容 |
+|---|---|
+| `hostapi_tempomap_clear()` `"()i"` | テンポ / 拍子マップとループを空にする。STOPPED のみ(PLAYING は -1) |
+| 満杯時の畳み込み(`set_tempo` / `set_meter`) | PLAYING 中に満杯なら、floor より前を「最後の 1 件」に畳んでから挿入する。拍子は小節番号の起点を保持する |
+| `HOSTAPI_SEQ_OP_STOP = 2` | 指定 tick で停止する。その tick のクロックは出さない。同 tick の先行イベント → 0xFC |
+
 ## 実装(共通コア / ホスト配線)
+
+| ファイル | 変更 |
+|---|---|
+| `shared/seq_core.c` / `.h` | `seqcore_tempomap_clear`、畳み込み(`compact_tempo_locked` / `compact_meter_locked`、起点 `s_meter_origin_*` / `s_tempo_origin_tick`)、`bar_beat_locked` を起点から走査、ディスパッチャに `OP_STOP`、selftest に 2 項目追加 |
+| `shared/hostapi_defs.h` | `HOSTAPI_SEQ_OP_STOP`、`X(hostapi_tempomap_clear, "()i")`、契約コメント |
+| `src/components/wasm_runtime/hostapi.cpp` / `hosts/linux/hostapi_seq.{c,h}` | ネイティブラッパ(1 行ずつ) |
+| `hosts/linux/tests/seq_core_test.c` / `hosts/linux/CMakeLists.txt` | **新設**。偽の時計でディスパッチを決定的に進める単体テスト 10 件、`ctest` |
+| `wasm-apps/seq_smoke/` | stage 8〜12 と CHK 4 bit を追加(8 → 12 項目)。`.wasm` 5,029 → 6,431 B |
+| `tools/midi_clock_probe/analyze.py` | 「再生区間ごとの 0xF8 数」「停止中の 0xF8 数」の 2 行 |
+| `scripts/device-regress.conf` | `HOLD_OVERRIDE[seq_smoke]` 20 → 60 |
+
+内部 RAM の静的な増加は起点 3 変数(12 B)。マップ上限・キュー深さは変えていない(ゲート 5)。
+ファームウェアは 1,045,984 B(Phase 14)→ **1,045,776 B**(-208 B。Phase 15 の変更を含む比較)。
+
 ## selftest / seq_smoke の結果(実機・Linux)
+
+| 検査 | Linux | 実機 |
+|---|---|---|
+| `seq_core_test`(`ctest`、既存 selftest を含む 10 件) | **10/10 PASS** | —(ホスト非依存の単体テスト) |
+| `seqcore_selftest`(`SEQCORE_SELFTEST` ビルド) | PASS(`seq_core_test` の `existing_selftest`) | **`SELFTEST PASS (0 failures)`**(追加 2 項目を含む。`captures/phase17/monitor-selftest.log`) |
+| seq_smoke(同じ `.wasm`) | **chk 4095**(CC#119 = 127 / CC#120 = 31、12 項目すべて合格) | **chk 4095**(同左) |
+
+`seq_core_test` の内訳: `existing_selftest` / `clear` / `restart_after_clear` / `tempo_compaction` / `meter_compaction_keeps_bar_numbers` / `loop_protects_entries` / `stop_on_boundary` / `stop_is_cancelled_by_flush` / `late_stop_keeps_playback_tick_monotonic` / `metronome_style_usage_unchanged`。
+ログ: `captures/phase17/seq_core_test.log`、`aseqdump-linux.log`、`aseqdump-device.log`。
+
 ## V1 / V2 / V3 / V4
+
+- **V1(枯渇しない)— 合格(両ホスト)**: seq_smoke stage 9 で、テンポ・拍子それぞれ **101 エントリ**(上限 32 の 3 倍超)を先読みで予約し、一度も -1 が返らず、境界から離れた位置の bar / beat / tempo_upq がすべて期待どおり(`CHK_NOEXHAUST`)。`seq_core_test` でもテンポ・拍子それぞれ 100 回、小節番号がずれないことを確認した。
+- **V2(再生の始め直し)— 合格(両ホスト)**: stage 10 で clear → 120bpm・4/4 で再開し、2 小節半のあいだ upq = 500000・4/4 の bar / beat(`CHK_RESTART`)。V1 で畳み込みが起きた後なので、**clear が効いていなければ at_tick=0 への設定自体が -1 になる**条件で確かめている。`seq_core_test` では「clear しないと前回の予約が効く」ことも再現した。
+- **V3(境界停止)— 合格(両ホスト)**: 最終区間(start → `OP_STOP` @ 11520)の 0xF8 がちょうど **288 発**、0xFC の後は **0 発**。
+
+  | ホスト | 記録器 | 再生区間ごとの 0xF8 | 停止中の 0xF8 | 0xFA / 0xFB / 0xFC |
+  |---|---|---|---|---|
+  | Linux | `midi-clock-probe --port MidiAppBox` | 604 / 198 / 3002 / **288** | **0** | 2 / 1 / 4 |
+  | 実機 | `aseqdump -p UM-ONE` | 605 / 195 / 3016 / **288** | **0** | 3 / 1 / 4 |
+  | 実機 | `midi-clock-probe --port UM-ONE` | 605 / 195 / 3016 / **288** | **0** | 3 / 1 / 4 |
+
+  最終区間以外の値がホストで違うのは、それらの区間の停止を app_tick(100ms 周期)から行っているため(stage 3 / 6 / 9)。
+  Linux の probe で 0xFA が 2 回(本来 3 回)なのは、ホストの ALSA ポートが現れてから probe が接続するまでの間に、
+  seq_smoke が `app_init` で最初の 0xFA を送っていたため。probe は開始を取り逃がした区間を最初のクロックから始めるので、区間ごとの数と停止中の数は正しい。
+
+- **V4(metronome の MIDI クロック)**: (測定中)
+
 ## 回帰
+
+- **実機(`device-regress.sh --task phase17`)— PASS**: 5 本とも free_int / PSRAM の差分 +0、largest_int 57,344(不変)、許容外の WARN/ERROR 0 件。free_int の水準は 105,880(Phase 15)→ 105,856(-24 B)。
+- **Linux** — 5 本とも `app_init=0` / `app started` / `app stopped`、警告 0、残留プロセスなし。
+  1 回目の touch_demo は、**実機の回帰と同時に走らせたため**、実機の seq_smoke が UM-ONE へ流したクロックを Linux ホストの MIDI IN が受け、ドレインしない touch_demo で `midi: RX ring buffer full` が 4,081 行出た。構成依存の挙動(Phase 10 最終回帰と同じ)で、実機の回帰が終わってから取り直して警告 0 を確認した。
+
 ## 仕様からの逸脱
+
+| # | 内容 | 理由 |
+|---|---|---|
+| 1 | 遅れて発火した `OP_STOP` の停止後 playback tick を、設計メモの「次に出す予定だったクロックの tick」ではなく **「最後に出したクロックの直後」**(`max(T, next_clock - 40 + 1)`)にした | 設計メモの式では、グリッドの外にある T(例: 100)で時間どおりに止めても playback tick が次のグリッド(120)に進んでしまう。単調性を保つのに必要なのは「出したクロックより前に戻らない」ことだけ |
+| 2 | テンポの畳み込みの floor に「現在のテンポ区間の開始」を加えた(拍子は現在の song tick のまま) | ディスパッチャが区間境界をまだ処理していない間に、その境界のエントリを消さないため。拍子は区間と無関係なので、floor を現在位置にしないと、テンポが一定の曲では拍子マップが畳めない |
+| 3 | `set_meter` の満杯時、挿入位置を件数で補正せずに探し直す | 畳み込み内部で floor を取り直すので、厳密に一致させるため |
+
 ## Phase 18 への申し送り
+
+- **再生を始め直すたびに `stop → tempomap_clear → at_tick=0 の初期値 → start`。** clear しないと前回の未来の予約が効き、畳み込み後は at_tick=0 へ書けない。
+- **小節境界で止めるときは `OP_STOP` を境界 tick に予約する。** `transport_start` はキューを空にするので、start の **後** に積むこと。停止はアプリから `get_position().state` で知る。
+- テンポ / 拍子の予約は先読み範囲(1〜2 小節)に留める。畳み込みは「先読み範囲で 32 件を超えない」ことが前提。
+- `seqcore`(Rust)の `BarEvents.stop` は、OP_STOP の予約に写す。
+
 ## 残課題
+
+- (V4・実機 selftest の結果を記入後に整理する)
