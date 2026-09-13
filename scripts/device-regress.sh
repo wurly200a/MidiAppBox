@@ -132,20 +132,27 @@ say "console ready"
 declare -a ROWS=()
 overall=0
 
+# 反復回数(U-2、Phase 18)。conf に無ければ 1 回
+declare -p REPEAT_OVERRIDE >/dev/null 2>&1 || declare -A REPEAT_OVERRIDE=()
+
 for app in $APPS; do
     hold="${HOLD_OVERRIDE[$app]:-$HOLD_SEC}"
-    say "--- $app (hold ${hold}s)"
+    runs="${REPEAT_OVERRIDE[$app]:-${REPEAT_RUNS:-1}}"
+    RUN_FIN_I=(); RUN_FIN_P=()
+  for ((run = 1; run <= runs; run++)); do
+    label="$app"; [ "$runs" -gt 1 ] && label="$app #$run"
+    say "--- $label (hold ${hold}s)"
 
     mark=$(line_count)
     send_cmd "run $app"
     if ! runline=$(wait_line 'MBCMD: run (ok|err)' "$mark" 20); then
-        ROWS+=("| $app | - | - | - | - | - | - | FAIL(run 応答なし) |"); overall=1; continue
+        ROWS+=("| $label | - | - | - | - | - | - | FAIL(run 応答なし) |"); overall=1; continue
     fi
     if [[ "$runline" == *"run err"* ]]; then
-        ROWS+=("| $app | - | - | - | - | - | - | FAIL(${runline#*MBCMD: }) |"); overall=1; continue
+        ROWS+=("| $label | - | - | - | - | - | - | FAIL(${runline#*MBCMD: }) |"); overall=1; continue
     fi
     if ! wait_line 'app: app_init\(\)' "$mark" 20 >/dev/null; then
-        ROWS+=("| $app | - | - | - | - | - | - | FAIL(app_init に到達せず) |"); overall=1; continue
+        ROWS+=("| $label | - | - | - | - | - | - | FAIL(app_init に到達せず) |"); overall=1; continue
     fi
 
     sleep "$hold"
@@ -153,7 +160,7 @@ for app in $APPS; do
     mark=$(line_count)
     send_cmd "stop"
     if ! stopline=$(wait_line 'app: stopped \(' "$mark" 30); then
-        ROWS+=("| $app | - | - | - | - | - | - | FAIL(停止しない) |"); overall=1; continue
+        ROWS+=("| $label | - | - | - | - | - | - | FAIL(停止しない) |"); overall=1; continue
     fi
 
     # I (12345) WASM: app: stopped (ok), free heap 105880 (at start 105880), largest block 57344
@@ -191,7 +198,26 @@ for app in $APPS; do
     [ "$fin_p"  -lt "$MIN_FREE_PSRAM" ] &&
         { verdict="FAIL(free_psram=$fin_p < $MIN_FREE_PSRAM)"; overall=1; }
 
-    ROWS+=("| $app | $start_i | $fin_i | $(printf '%+d' "$d_i") | $lgst_i | $(printf '%+d' "$d_p") | $lgst_p | $verdict |")
+    ROWS+=("| $label | $start_i | $fin_i | $(printf '%+d' "$d_i") | $lgst_i | $(printf '%+d' "$d_p") | $lgst_p | $verdict |")
+    RUN_FIN_I+=("$fin_i"); RUN_FIN_P+=("$fin_p")
+  done
+
+    # 反復判定(U-2、Phase 18): 1 回ごとの差分が 0 でも、開始値自体が回を追って
+    # 下がる漏れを捕まえるため、N 回の終了時の値がすべて同じことを要求する
+    if [ "$runs" -gt 1 ]; then
+        if [ "${#RUN_FIN_I[@]}" -ne "$runs" ]; then
+            ROWS+=("| $app 反復 ${runs} 回 | - | - | - | - | - | - | FAIL(途中の回が失敗) |"); overall=1
+        else
+            min_i=$(printf '%s\n' "${RUN_FIN_I[@]}" | sort -n | head -1)
+            max_i=$(printf '%s\n' "${RUN_FIN_I[@]}" | sort -n | tail -1)
+            min_p=$(printf '%s\n' "${RUN_FIN_P[@]}" | sort -n | head -1)
+            max_p=$(printf '%s\n' "${RUN_FIN_P[@]}" | sort -n | tail -1)
+            rv="PASS"
+            [ "$min_i" != "$max_i" ] && { rv="FAIL(反復で free_int が変化)"; overall=1; }
+            [ "$min_p" != "$max_p" ] && { rv="FAIL(反復で free_psram が変化)"; overall=1; }
+            ROWS+=("| $app 反復 ${runs} 回 | - | ${min_i}〜${max_i} | - | - | - | psram ${min_p}〜${max_p} | $rv |")
+        fi
+    fi
 done
 
 # --- WARN / ERROR の集計 -----------------------------------------------------

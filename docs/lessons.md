@@ -199,6 +199,19 @@ herdr 運用・ビルド手順そのものの教訓は `docs/workflow.md` に一
   `locate(0)` より前に `set_meter(0, …)` を呼ぶ。ガードを揃えたくなったら、既存アプリの
   呼び出し順をソースで確認すること(17)。
 
+## Sequencer app(Phase 18)
+- **WAMR のプール消費は x86_64 と ESP32-S3 で違う。** 同じ sequencer.wasm で、ロード時の最大消費が
+  Linux 58,784 B / 実機 43,216 B。**Linux で「動かない」が実機では動く(逆はない)**ので、
+  プールの余裕は必ず実機のログで見る。Linux のプールを実機と同じ 48KB に揃えていたのは、
+  この差のため意味が薄かった(Linux は 96KB にした)(18)。
+- **`wasm_runtime_get_mem_alloc_info` の `highmark_size` は、2 回目以降のロードで壊れた値
+  (4294967xxx)を返した。** 最初のロードの値だけを使うか、`total_free_size` から算出する(18)。
+- **`.wasm` の大きさの内訳は、セクションを読めば分かる**(`wasm-objdump` が無くても、先頭 8 バイトの後に
+  「ID + LEB128 長さ」が並ぶだけ)。プール消費はコードセクションにほぼ比例して増えた
+  (seq_smoke 5.5KB → 29.0KB、sequencer 13.3KB → 58.8KB。いずれも Linux)(18)。
+- **シェルで ms を秒に直すときに `sleep 0.$(printf %03d $ms)` と書かない。** 1,000ms を超えると
+  「0.3600 秒」のように桁が崩れ、撮るはずのタイミングを外した。`sleep "$(printf '%d.%03d' $((ms/1000)) $((ms%1000)))"` にする(18)。
+
 ## ホスト共通(Phase 11 で得たもの)
 - 実機と Linux ホストで**同じロジックを二重に書かない**。L0/L1 は
   `shared/seq_core.c`(OS API を呼ばない移植可能な C)に置き、時刻源・排他・
@@ -227,12 +240,21 @@ herdr 運用・ビルド手順そのものの教訓は `docs/workflow.md` に一
   ウィンドウ位置・画面原点いずれでも常に黒画面になり使えない。GNOME Shell の
   D-Bus `org.gnome.Shell.Screenshot.ScreenshotArea` も `AccessDenied` で
   未署名スクリプトから呼べない。画面キャプチャの自動化は未解決(check-workflow)。
+  **【Phase 18 で訂正】画面キャプチャは取れる。** x11grab が黒いのは画面全体(ルートウィンドウ)を
+  読むため。**ウィンドウ ID を指定する `import -window <id>` / `xwd -id <id>` なら SDL ウィンドウの
+  中身が取れる**(静止画は `scripts/screen-still.sh`、動画は `xwd` を 10fps で連続取得して ffmpeg で
+  まとめる `scripts/screen-rec.sh`)。check-workflow ではウィンドウ単位の取得を試していなかった(18)。
 - `xdotool` によるウィンドウ検索・ジオメトリ取得・キー送信(Escape 等)は機能するが、
   **マウスクリックの配信は不安定**(`getmouselocation` で狙った座標に一致していても、
   意図しない行に届く/どこにも届かないことがある。`windowactivate` や `sleep` を
   挟んでも解消せず)。ボタン/メニュークリックに依存する自動 UI 操作は現状信頼できない。
   ランチャー経由が必要なければ単発実行モード(`./build/midibox_host <app>.wasm`
   で直接起動)を使うとメニュークリック自体を回避できる(check-workflow)。
+  **【Phase 18 の観察】** 単発実行モードの sequencer に対し、pid で選んだウィンドウへ
+  `mousemove --window <id> x y` → `click --window <id> 1`(座標は論理座標の 2 倍)を送ったところ、
+  **一覧 → Session 画面 → スクロール → PLAY → BACK の全クリックが意図どおり届いた**ことを
+  キャプチャで確認した。当時の不安定さの原因は未特定だが、**キャプチャで届き先を確かめながら**なら
+  画面遷移の確認に使える。`docs/workflow.md` §1-8 の「使わない」の見直しは承認を得てから(18)。
 - `xdotool search --name "MidiAppBox WASM host"` は複数のウィンドウ ID を返す
   ことがあり、うち `mutter-x11-frames` の装飾ウィンドウが無関係に混入する
   ケースを確認。`xdotool getwindowpid <id>` と `pgrep -af midibox_host` の

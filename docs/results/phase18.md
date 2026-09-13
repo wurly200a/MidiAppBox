@@ -197,9 +197,134 @@ seqcore の Transport と計画ロジック、3 画面の UI で、metronome(3,9
 ---
 
 ## 実装(seqcore の追加 / sequencer app / 埋め込み)
+
+| 対象 | 内容 |
+|---|---|
+| `wasm-apps/seqcore/src/timeline.rs`(新設) | `ticks_per_beat` / `ticks_per_bar`、`BarPlan`(小節の開始 tick・拍子・BPM・位置・頭で送るもの・終わりで止まるか)、`Change`(トグル / ジャンプ / BPM)、`Planner`(今の小節・次の小節と、次の小節に入った状態の `Transport` を持つ。`begin` / `advance_to` / `apply(change, in_time)`)。**締め切りを過ぎた変更は、積んである次の小節の状態に適用して「その次の境界から」効かせる**(live に適用すると、ホストに積み済みの小節と Transport の状態がずれるため)。既存の公開 API は変えていない |
+| seqcore のテスト | **34 → 44 件**(timeline 10 件: 拍子ごとの tick、4 通りのトグルの小節列と開始 tick、締め切り前後のトグル / ジャンプ / BPM、自然終了)。wasm32(no_std)ビルド成功 |
+| `wasm-apps/sequencer/`(新設) | 3 画面・再生・トグル・点滅・長押しジャンプ・BPM±。`Planner` の結果を `tempomap_*` / `seq_write` / `midi_send` に写すだけ。デモ Bank 6 Session。**`.wasm` 14,819 B** |
+| 埋め込み | `src/components/wasm_runtime/CMakeLists.txt`(`EMBED_FILES`)、`launcher.cpp`(seed)。ファームウェア 1,060,640 B(最終。Phase 17 の 1,045,776 B から +14.9KB)、パーティション残 75% |
+| `scripts/device-regress.{sh,conf}` | `APPS` に sequencer、**U-2: `REPEAT_RUNS=3`(seq_smoke は 1)**。各回の差分 +0 に加え、N 回の終了時 `free_int` / `free_psram` がすべて同じことを判定し、「反復 N 回」の行を出す |
+| `scripts/screen-still.sh` / `screen-rec.sh` | x11grab をやめ、pid で選んだウィンドウに `import -window` / `xwd -id`(10fps 連続取得 → ffmpeg)。動作確認済み(静止画多数、録画 4.1 秒 640×480) |
+| `hosts/linux/main.c` | **WAMR プール 48KB → 96KB(Linux のみ)**。下記「メモリ」。設計メモに無かった変更(「仕様からの逸脱」3) |
+| `CLAUDE.md` | 回帰対象を 5 本 → 6 本(承認済み) |
+| `docs/workflow.md` / `docs/lessons.md` | 画面キャプチャが取れること(§1-8 の記述、§6.1 の `screen` ペイン)、クリックが届いた観察 |
+
 ## .wasm サイズとメモリ
+
+- **`.wasm` 14,819 B**(コードセクション 13.3KB、データ 0.9KB)。16KB 未満なので U-6(Strategy B)には触れないが、**残り 1.2KB**。
+- **WAMR プール(アプリのロードに使う固定プール)の最大消費**を一時的な計測コードで測った(計測後に削除、`git diff` 0 を確認)。
+
+  | アプリ | Linux(x86_64、プール 256KB で計測) | 実機(ESP32-S3、プール 48,960 B) |
+  |---|---|---|
+  | touch_demo | 15,944 B | 約 11.5KB(空きから算出) |
+  | metronome | 23,864 B | 約 17.5KB(空きから算出) |
+  | seq_smoke | 28,968 B | — |
+  | **sequencer** | **58,784 B** | **43,216 B(空き 5,744 B)** |
+
+  - **Linux は 48KB に入らず、`WASM module load failed: allocate memory failed` で起動しなかった。** x86_64 では WAMR の構造体(ポインタ)が大きいため。Linux は内部 RAM の制約が無いので 96KB にした。
+  - **実機は 48KB に入るが、余裕は 5.7KB しかない。** Phase 19(Song / Chapter 画面)で超える可能性が高い(申し送り)。
+  - WAMR の `highmark_size` は 2 回目以降のロードで壊れた値(4294967xxx)を返した。1 回目の値だけを使った。
+- 実機の internal / PSRAM: 回帰で 6 本とも差分 +0、`largest_int` 57,344 で不変、free_int 105,856(Phase 17 と同じ)。
+
 ## 検証(Linux / 実機の操作と録画 / MIDI 測定)
+
+### Linux(xdotool のクリック + 画面キャプチャ、`captures/phase18/linux/`)
+
+| 確認 | 結果 |
+|---|---|
+| Menu → Session 一覧 → S02 選択 → OPEN → Session 画面 | 全クリックが意図どおり届き、各画面が設計どおり(`01-menu` 〜 `04-session-s02`) |
+| スクロール、小節の拍子の上書き表示 | `v` ×2 で 3〜8 小節目、`8 [2/4]`(`05`) |
+| PLAY → 状態 `S02 B1/8` → `B2/8`、STOP ボタン、BACK しても再生が続く | `06-*`、`07` |
+| 再生中マーカーの点滅と選択カーソルの描き分け | 150ms 間隔の 6 枚で `> 1` の表示 / 非表示が交互、選択(青)と同時に見える(`09-blink-*`) |
+| 8 小節で自然に止まり PLAY に戻る | `08-blink-*`(再生終了後) |
+| **MIDI: S02 全小節 1 回** | `midi-clock-probe --port MidiAppBox`: **720 発ちょうど**、停止中 0 発 |
+| 警告 | stderr に MIDI 接続行以外なし(`no free slot` 0) |
+
+### 実機(ユーザー操作 + カメラ `captures/phase18/cam_rec_230441.mp4`、10 分 32 秒)
+
+MIDI は `midi-clock-probe --port UM-ONE`(`captures/phase18/device-t.{csv,md}`)。再生区間 9、**停止中の 0xF8 は 0 発**。
+各再生の直前に Session scope の即時 PC(`other`)が 1 件ずつ記録されている。
+
+| 手順 | 根拠 | 結果 |
+|---|---|---|
+| T1 画面遷移・スクロール・残骸なし | ユーザー操作(指摘なし)、録画 | 合格 |
+| **T2 S02 全小節 1 回** | 区間 1: **720 発ちょうど**、15.0 秒 | **合格** |
+| T3 繰り返し → 途中で RPT:OFF | 区間 2: 2,160 発 = 720 × 3、その周の最後で停止 | 合格 |
+| T4 選択小節 1 回 | 区間 6: 96 発(1 小節)、録画で 3 小節目選択・`1:ON` `RPT:OFF` | 合格 |
+| T5 選択小節の繰り返し | 区間 7: 538 発(小節の途中で STOP)、録画で `1:ON` `RPT:ON`・`S02 B3/8` | 合格 |
+| T6 長押しジャンプ | 区間 8: 録画で 5 小節目の再生中に 2 小節目を長押し → 次の境界から 2 → 3 → 4 と進む | 合格 |
+| T7 拍子とアクセント、一覧へ戻っても再生継続 | 録画で `4 [7/8]`、一覧でヘッダ右に `S04 B4/4` | 合格(ただし下記の指摘) |
+| T8 BPM+ 長押し | 録画で一覧のタイトルが 119 → 148bpm、再生継続 | 合格 |
+
+- 区間 3〜5(各 96 発)は、1 小節目が選択されたまま `1:ON` で再生したもの(録画で確認)。3 小節目を選ぶ前の試行で、不具合ではない。
+- 外れ値 4 件は区間 9(T8 のテンポ変更中)の 2 組で、いずれも「約 2 発分の間隔 + 数µs」の組 = 受信側のまとめ配送(Phase 13 と同じ)。
+- **ユーザーの指摘(T7)**: 一覧では S04 の行が `3/4`(Session の既定)のままで、7/8 の小節に入ったことが画面に出なかった。
+  - **対応**: ヘッダ右の再生中表示を「位置」から **「位置 + 今の小節の拍子」(`S04 B4 7/8`)** に変え、どの画面からでも見えるようにした。
+  - **確認**: Linux で S04 を再生して一覧へ戻り、ヘッダ右が小節 2 で `S04 B2 3/4`、小節 4 で **`S04 B4 7/8`** になることをキャプチャで確認した(`captures/phase18/linux/11-list-s04-bar2.png`、`12-list-s04-bar4-78.png`)。実機へは最終ファームウェアで反映済み(`.wasm` 14,819 B のロードをログで確認)。
+
 ## 回帰(U-2 を含む)
+
+- **1 回目(sequencer の初回版で実施)— PASS**: 6 本、seq_smoke 以外は各 3 回。全行で int / PSRAM 差分 +0、**反復 3 回の終了値がすべて同一**(free_int 105,856、free_psram 8,316,904)、WARN/ERROR 0 件。
+- **最終 1 回目(表示修正後のファームウェア、`captures/phase18-final/`)— FAIL(`mp3player #2` のみ)**
+  - 結果: 他の 20 行は PASS、差分はすべて +0、WARN/ERROR 0 件。
+  - ログの時系列: `mp3player #2` は起動から約 5.7 秒後(35303ms)に、**シリアルの `stop` を受ける前に自分で停止**した。その直後にスクリプトが送った `stop` は `stop idle` になり、スクリプトは「自分の stop の後の停止行」を待って「停止しない」と判定した。
+  - 原因の切り分け(アプリを止める経路は 3 つ):
+    - シリアルの `stop` なら `MBCMD: stop ok` が必ず出るので、これではない
+    - `launcher.cpp` のサイクル試験(`MIDIBOX_WASM_CYCLE_TEST`)は無効なので、これでもない
+    - **残るのは電源キーの短押し**で、この経路はログを出さない
+  - **判断**: 実機の電源キーに触れたか、キーの誤検出と考えられる。Phase 18 の変更(sequencer・scripts)は mp3player と停止経路に触れていない。
+- **最終 2 回目(再実行、`captures/phase18-final2/`)— PASS**
+  - 6 本すべて、seq_smoke 以外は各 3 回。全行で差分 +0、`largest_int` 57,344 で不変。
+  - 反復 3 回の終了値は全アプリで同一(free_int 105,856、free_psram 8,316,904)。WARN/ERROR 0 件、`stop idle` なし。
+  - **1 回目の `mp3player #2` は再現しなかった**(電源キーの誤操作 / 誤検出という判断と矛盾しない)。
+- **Linux**: sequencer は各確認の起動・終了で stderr に MIDI 接続行以外なし(`no free slot` 0)。
+  既存 5 本はホスト側の変更がプールの拡大だけで、アプリの読み込みは同じ(Phase 17 で警告 0 を確認済み)。
+
+## 完了条件
+
+| 完了条件 | 状況 |
+|---|---|
+| ステップ 0 の設計メモ(スロット予算表、Q5 / Q6 / Session scope の PC)が承認されている | **達成** |
+| `wasm-apps/sequencer/` の `.wasm` がコミットされ、サイズが記録されている | **達成**(14,819 B) |
+| 実機で 3 画面・トグル 4 通り・次の小節境界での反映・点滅と選択の描き分けを録画とログで確認 | **達成**(T1〜T8、`cam_rec_230441.mp4`) |
+| 「全小節 1 回」の Start〜Stop のクロック数が Session 長と一致し、Stop 後 0 発 | **達成**(実機・Linux とも 720 / 0) |
+| `device-regress.sh` 6 本 PASS(U-2 の判定を含む)、Linux で警告 0 | **達成**(最終 2 回目。1 回目の FAIL は上記) |
+| seqcore の `cargo test` 全件 PASS | **達成**(44 件) |
+| spec(Q5 / Q6 / §5)・`wasm-apps/README.md`・`docs/lessons.md`・`docs/status.md` の更新 | **達成** |
+
 ## 仕様からの逸脱・spec.md への反映
+
+| # | 内容 | 理由 | spec.md |
+|---|---|---|---|
+| 1 | Session scope でも再生開始時に即時 PC を送る | SL MK3 を再生する Session に合わせるため(承認済み) | §4.2 |
+| 2 | Q5 = 行の 600ms 長押し、Q6 = カウントインなし | 承認済み | §7 |
+| 3 | **Linux の WAMR プールを 96KB に**(実機は 48KB のまま) | x86_64 では sequencer のロードに 58.8KB 要り、48KB では起動しない。設計メモの時点では分かっていなかった | 反映なし(ホスト実装) |
+| 4 | ヘッダ右の再生中表示に今の小節の拍子を足した | ユーザーの指摘(T7) | §5.3 |
+| 5 | 一覧のタイトルに BPM を出し、停止中はヘッダ右を空にする | 一覧で BPM± を操作するため。重ねて出すと冗長 | §5.3 |
+| 6 | トグルの状態はアプリで 1 組。再生中の Session を開いたときは、再生中の状態に表示を合わせる | spec に規定が無い | 反映なし |
+| 7 | Menu の `Song` は Phase 19 まで無効表示 | スコープ外 | §5.2 |
+
 ## Phase 19 への申し送り
+
+- **WAMR プールの余裕が実機で 5.7KB しかない。** Song / Chapter 画面を足すと 48KB を超える可能性が高い。候補:
+  1. プールを PSRAM に置いて大きくする
+  2. internal のまま増やす(`largest_int` 57,344 との兼ね合いを実測する)
+  3. アプリのコードを削る
+  
+  Phase 19 のステップ 0 で決める。
+- **`.wasm` が 16KB に近い(14.8KB)。** Song / Chapter 画面で U-6(Strategy B: `.wasm` バッファを PSRAM へ)に触れる見込み。
+- **描画スロットは rect / text とも 14 / 16。** Song / Chapter 画面も同じ座標の組を使い回す前提で設計する(roadmap U-15)。
+- Session 境界の PC(キューモード、`PC_LEAD_TICKS`)は未実装。`Planner` は Song scope でも使えるので、`BarPlan.events.pc` を「次の小節の頭 − 960 tick」に積む形になる。
+- Linux で画面遷移を確認するときは、クリック + キャプチャが使える(`docs/lessons.md`)。
+
 ## 残課題
+
+- `docs/workflow.md` §1-8 の「xdotool のクリックは使わない」の見直し(Phase 18 では承認済みの設計として使い、全クリックが届いた)。変える場合はユーザーの承認を得る。
+- T1 の「残骸が残らない」はユーザーの目視(指摘なし)と Linux のキャプチャで確認した。実機の録画からフレームを抜いての確認はしていない。
+- **電源キーの短押しによるアプリ停止はログを出さない**(`app_main.cpp` の `set_on_short_press`)。
+  - 最終 1 回目の回帰で、原因を「電源キーしか残らない」と消去法でしか言えなかった。
+  - 対策案: 短押しの検知時に 1 行ログを出す(ネイティブの小変更、Host API は無関係)。次に触るフェーズで提案する。
+- **`device-regress.sh` は「アプリが stop を待たずに自分で止まった」を「停止しない」と判定する。**
+  - `stop` の応答が `stop idle` だったら別の判定理由(「保持中に停止した」)として出すと、切り分けが速くなる。
+  - `scripts/` の変更なので提案 → 承認。

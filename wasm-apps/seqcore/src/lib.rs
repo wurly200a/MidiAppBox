@@ -10,9 +10,11 @@
 pub mod fixed;
 pub mod model;
 pub mod resolve;
+pub mod timeline;
 pub mod transport;
 
 pub use fixed::FixedVec;
 pub use model::*;
 pub use resolve::{effective_meter, effective_tempo};
+pub use timeline::*;
 pub use transport::*;

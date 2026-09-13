@@ -47,7 +47,11 @@ docs/results/)。
 8. **実機のタッチ操作はユーザーに物理操作を依頼する**(プログラム注入経路なし)。
    Linux ホストの UI クリック自動化(xdotool のマウスクリック)は信頼できないため
    使わない。ランチャー操作が不要なら単発実行モードで回避する。
-   画面キャプチャの自動化(x11grab 等)はこの環境では未解決・スコープ外。
+   Linux ホスト(SDL ウィンドウ)の画面キャプチャは `scripts/screen-still.sh` /
+   `screen-rec.sh` で取れる(Phase 18。ウィンドウ ID を指定する `import -window` / `xwd -id`。
+   x11grab は画面全体を読むのでこの環境では黒くなり、使わない)。キャプチャでクリックの
+   届き先を確かめられるようになったので、Phase 18 では xdotool のクリック + キャプチャで
+   画面遷移を確認した(承認済みの設計。本項の「使わない」の見直しは別途承認を得る)。
 9. **キャプチャ出力は `captures/<タスク名>/`**(.gitignore 対象)。
    Zenn 素材として残すものは `~/ビデオ/zenn-phaseXX/` にコピー。
 10. `.claude/settings.local.json` の permissions 追記が必要になったら、
@@ -356,7 +360,7 @@ down split して積む。プロンプトとの高さ比率は `HPANE_PROMPT_ROW
 | `unix-build` | Linux ホスト(SDL)ビルド / 実行 | 一発コマンド |
 | `camera` | カメラ撮影(ffmpeg / v4l2-ctl、`scripts/cam-rec.sh`/`cam-still.sh`) | `send`(常駐)+ `run`(単発) |
 | `zenn` | Zenn ドキュメント作成関連 | 一発コマンド |
-| `screen` | Linux ホスト(SDL ウィンドウ)の画面撮影用(`scripts/screen-rec.sh`/`screen-still.sh`)。**現状この環境では x11grab が機能せず未使用・将来検討** | 一発コマンド(保留) |
+| `screen` | Linux ホスト(SDL ウィンドウ)の画面撮影用(`scripts/screen-rec.sh`/`screen-still.sh`)。**Phase 18 でウィンドウ単位の取得(`xwd -id` / `import -window`)に切り替えて使えるようになった**(x11grab は黒くなるので使わない) | `send`(録画、Enter で停止)+ `run`(静止画) |
 
 新しいラベルを増やす場合は事前にユーザーの承認を得ること。
 

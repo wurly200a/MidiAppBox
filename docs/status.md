@@ -464,3 +464,18 @@ CLAUDE.md から独立して更新する(CLAUDE.md 本体は書き換えない)�
     - `midi-clock-probe` に「区間ごと / 停止中のクロック数」を追加
     - `device-regress.conf` の seq_smoke 保持時間を 60 秒に変更
   - **次**: Phase 18(Session 画面 + 単体再生)の指示書作成と、そのときの `docs/roadmap.md` 更新。
+
+- **Phase 18(docs/prompts/phase18.md、Session 画面と単体再生 = Sequencer app の初回 `.wasm`)完了(2026-09-13)。**
+  詳細は `docs/results/phase18.md`。
+  - **`wasm-apps/sequencer/`**(`.wasm` 14,819 B)
+    - **3 画面**: Menu / Session 一覧 / Session 画面。描画スロットは全画面で同じ座標を使い回し、rect 14 / text 14
+    - **再生**: Play / Stop、トグル `1` / 矢印、再生中小節の点滅、行の長押しジャンプ(Q5)、一覧で BPM±
+    - **時間軸**: 計画は **`seqcore::timeline::Planner`**(新設、seqcore のテスト 34 → 44)。先読みは次の 1 小節、変更の締め切りは 150ms
+    - **自然終了**: 小節境界の `OP_STOP` で止まる
+  - **実機でユーザー操作 T1〜T8 を録画で確認、全合格。** S02 全小節 1 回のクロックは **720 発ちょうど、停止中 0 発**(実機・Linux とも)。
+    ユーザーの指摘(一覧で 7/8 の小節に入ったことが見えない)を受け、ヘッダ右に今の小節の拍子を出すようにした。
+  - **Linux の画面キャプチャが取れるようになった。** x11grab ではなくウィンドウ ID 指定の `import -window` / `xwd -id`。
+    `scripts/screen-still.sh` / `screen-rec.sh` を切り替えた。xdotool のクリック + キャプチャで画面遷移も確かめた。
+  - **WAMR プール**: sequencer のロードに実機で 43.2KB / 48KB(**余裕 5.7KB**)、Linux(x86_64)で 58.8KB。
+    **Linux だけプールを 96KB にした。** Phase 19 で実機のプールが足りなくなる見込み(申し送り)。
+  - **回帰**: 6 本(sequencer を追加、`CLAUDE.md` も更新)。**U-2(同じアプリを 3 回反復して終了値が同一)を `device-regress.sh` に入れて PASS。**

@@ -39,7 +39,12 @@
 #define MENU_ROW_GAP 2
 #define MENU_STATUS_Y 220
 
-static uint8_t s_wamr_heap[48 * 1024]; /* 実機(Phase 7B で 64→48KB)と同一 */
+/* 実機は Phase 7B で 64→48KB。Linux も長く同じ 48KB にしていたが、x86_64 では WAMR の
+ * 構造体(ポインタ)が大きく、同じ .wasm でもプール消費が実機より大きい。Phase 18 の
+ * sequencer(コード 13KB)は実機の 48KB で起動するが、Linux では load 時の最大消費が
+ * 58.8KB になり「allocate memory failed」で起動しなかった(docs/results/phase18.md)。
+ * Linux は内部 RAM の制約が無いので 96KB にする。実機の余裕は実機のログで見る。 */
+static uint8_t s_wamr_heap[96 * 1024];
 
 static NativeSymbol s_native_symbols[] = {
     HOSTAPI_NATIVE_SYMBOLS(HOSTAPI_SYMBOL_ENTRY)

@@ -33,6 +33,8 @@ extern const uint8_t midi_loopback_wasm_start[] asm("_binary_midi_loopback_wasm_
 extern const uint8_t midi_loopback_wasm_end[]   asm("_binary_midi_loopback_wasm_end");
 extern const uint8_t seq_smoke_wasm_start[] asm("_binary_seq_smoke_wasm_start");
 extern const uint8_t seq_smoke_wasm_end[]   asm("_binary_seq_smoke_wasm_end");
+extern const uint8_t sequencer_wasm_start[] asm("_binary_sequencer_wasm_start");
+extern const uint8_t sequencer_wasm_end[]   asm("_binary_sequencer_wasm_end");
 // 検証用 MP3(hostapi_audio_* のミュージックルートへシード)
 extern const uint8_t test_mp3_start[] asm("_binary_test_mp3_start");
 extern const uint8_t test_mp3_end[]   asm("_binary_test_mp3_end");
@@ -222,6 +224,9 @@ bool launcher_prepare_sd(char* status, size_t status_len)
     // 新 API 12 関数の恒久スモーク(Phase 11)
     snprintf(path, sizeof(path), "%s/seq_smoke.wasm", kAppsDir);
     seed_file(path, seq_smoke_wasm_start, seq_smoke_wasm_end);
+    // Sequencer app(Phase 18)
+    snprintf(path, sizeof(path), "%s/sequencer.wasm", kAppsDir);
+    seed_file(path, sequencer_wasm_start, sequencer_wasm_end);
 
     // hostapi_audio_* のミュージックルートと検証用 MP3 (Phase 6B)
     if (stat("/sdcard/music", &st) != 0 && mkdir("/sdcard/music", 0775) != 0) {
