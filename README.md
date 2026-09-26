@@ -1,3 +1,11 @@
+# MidiAppBox → Kybotos
+
+> **このリポジトリは移転しました。開発は [kybotos/kybotos](https://github.com/kybotos/kybotos) で続けています**(名前を Kybotos に変えました)。
+> ここは過去の記事から参照されているため、Phase 18 の時点のまま残し、アーカイブしています。
+>
+> **This repository has moved.** Development continues at [kybotos/kybotos](https://github.com/kybotos/kybotos) under the new name *Kybotos*.
+> This repository is kept as of Phase 18 and archived.
+
 
 ## Demo
 
